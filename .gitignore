@@ -1,0 +1,28 @@
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+dist/
+build/
+*.egg-info/
+
+.env
+.DS_Store
+
+# Local caches and generated artifacts
+.cache/
+data/*.sqlite
+data/*.db
+
+# Cloned reference copy of obra/superpowers, not part of this project
+.superpowers-reference/
+
+# UI
+ui/node_modules/
+ui/.next/
+ui/out/
+ui/.turbo/
