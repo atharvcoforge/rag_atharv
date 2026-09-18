@@ -15,7 +15,6 @@ import math
 import re
 from collections import Counter, defaultdict
 from collections.abc import Callable, Sequence
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
 from ragpolicy.ingest import Chunk, contextual_text
@@ -32,9 +31,18 @@ _STOPWORDS = frozenset(
     we were what when where which while who will with would you your""".split()
 )
 
+# Framing matters more than the model here. Measured over six positive and five negative
+# pairs, asking "does the excerpt contain the answer" leaves the positive minimum at
+# 0.0002 against a negative maximum of 0.0003, which is no separation at all: the model
+# reads "$20 lunch" against a "$25 or more" rule and says no because $20 is not written
+# down. Asking which excerpt *governs* the question, and saying outright that a general
+# threshold governs the specific amounts under it, moves the positive minimum to 0.1245
+# against a negative maximum of 0.0320. Same model, same candidates, usable margin.
 RERANK_SYSTEM = (
-    "You judge whether a policy excerpt contains the information needed to answer a "
-    "question. Reply with exactly one word: yes or no."
+    "You decide whether a policy excerpt is the rule that governs a question. A general "
+    "threshold or limit governs any specific amount it covers. An excerpt that never "
+    "mentions the thing asked about does not govern it. Reply with exactly one word: "
+    "yes or no."
 )
 
 
@@ -146,29 +154,23 @@ class ScoredHit:
 Scorer = Callable[[str, str], float]
 
 
-def rerank(query: str, hits: Sequence[Hit], scorer: Scorer, workers: int = 6) -> list[ScoredHit]:
+def rerank(query: str, hits: Sequence[Hit], scorer: Scorer) -> list[ScoredHit]:
     """Score every candidate against the query with a cross-encoder, then sort.
 
-    Candidates are scored concurrently. Each call is a single-token generation, so the
-    cost is dominated by prompt evaluation and parallelism converts it almost directly
-    into wall-clock savings.
+    Scored serially on purpose. A thread pool was tried and removed: Ollama serialises
+    requests to a single model, so eight candidates took 1190ms sequentially and 1288ms
+    across four threads. The pool bought nothing but contention.
     """
-    if not hits:
-        return []
-
-    with ThreadPoolExecutor(max_workers=min(workers, len(hits))) as pool:
-        scores = list(pool.map(lambda hit: scorer(query, hit.chunk.text), hits))
-
     scored = [
-        ScoredHit(chunk=hit.chunk, distance=hit.distance, score=score)
-        for hit, score in zip(hits, scores, strict=True)
+        ScoredHit(chunk=hit.chunk, distance=hit.distance, score=scorer(query, hit.chunk.text))
+        for hit in hits
     ]
     scored.sort(key=lambda hit: (-hit.score, hit.distance, hit.chunk.chunk_id))
     return scored
 
 
 def rerank_prompt(query: str, excerpt: str) -> str:
-    return f"Excerpt: {excerpt}\nQuestion: {query}\nDoes the excerpt contain the answer?"
+    return f"Excerpt: {excerpt}\nQuestion: {query}\nDoes this excerpt govern the question?"
 
 
 def expand_to_sections(hits: Sequence[Hit], corpus: Sequence[Chunk]) -> list[Chunk]:

@@ -94,7 +94,29 @@ true. CI uses NumPy; local development uses Postgres.
    logprobs come back identical at -11.93. That build targets vLLM sequence
    classification and the conversion lost the head. Measured and rejected.
 
-   `qwen3:8b` serves as the cross-encoder instead, scoring roughly 165ms per candidate
+   **Reranker model size was measured, not assumed.** Over six positive and six negative
+   query/excerpt pairs:
+
+   | model | ms/call | positive min | negative max | margin |
+   |---|---|---|---|---|
+   | qwen3:0.6b | 21 | 0.3504 | 0.9562 | -0.6058 |
+   | qwen3:1.7b | 51 | 0.0000 | 0.9451 | -0.9451 |
+   | qwen3:8b | 153 | 0.1245 | 0.0320 | **+0.0925** |
+
+   Only the 8B model separates the classes at all. The 0.6B model is barely better than
+   chance. The 1.7B model looks competent on easy pairs and then scores "rental car"
+   against "Luxury vehicle upgrades are not reimbursable" at 0.945, which is exactly the
+   failure this system exists to prevent. Reranking is where parameter count buys
+   correctness rather than polish, so the 3x latency is paid deliberately.
+
+   **Prompt framing mattered more than model choice.** Asking "does the excerpt contain
+   the answer" gives a positive minimum of 0.0002 against a negative maximum of 0.0003,
+   which is no signal: the model sees "$20 lunch" against a "$25 or more" rule and says
+   no, because $20 is not written down. Asking which excerpt *governs* the question, and
+   stating that a general threshold governs the specific amounts under it, moves the
+   positive minimum to 0.1245. Same model, same candidates, a usable margin.
+
+   `qwen3:8b` serves as the cross-encoder instead, scoring roughly 153ms per candidate
    and separating relevant from irrelevant cleanly (`yes` at -0.0 against `no` at -27.1
    on a positive pair). It is already resident for generation, so this removes 639MB of
    weights rather than adding them. Two details are load-bearing: `think` must be false,
