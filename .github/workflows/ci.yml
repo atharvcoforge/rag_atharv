@@ -1,0 +1,27 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      # No services: the suite stubs Ollama with an httpx MockTransport and falls back
+      # to the in-memory NumPy store, so Postgres-backed tests skip themselves here.
+      - run: uv sync
+
+      - run: uv run ruff check .
+
+      - run: uv run ruff format --check .
+
+      - run: uv run mypy
+
+      - run: uv run pytest
