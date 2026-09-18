@@ -38,9 +38,7 @@ class Settings:
             rerank_model=os.getenv("RERANK_MODEL", "dengcao/Qwen3-Reranker-0.6B:Q8_0"),
             gen_model=os.getenv("GEN_MODEL", "qwen3:8b"),
             vector_store=os.getenv("VECTOR_STORE", "postgres"),
-            postgres_dsn=os.getenv(
-                "POSTGRES_DSN", "postgresql://rag:rag@localhost:5433/ragpolicy"
-            ),
+            postgres_dsn=os.getenv("POSTGRES_DSN", "postgresql://rag:rag@localhost:5433/ragpolicy"),
             policy_path=path_of("POLICY_PATH", "policy.md"),
             embed_cache_path=path_of("EMBED_CACHE_PATH", ".cache/embeddings.sqlite"),
             cassette_dir=path_of("CASSETTE_DIR", "tests/cassettes"),
