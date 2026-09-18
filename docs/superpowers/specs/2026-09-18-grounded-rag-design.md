@@ -83,10 +83,24 @@ true. CI uses NumPy; local development uses Postgres.
    approximation. Ceiling noted in code: above ~100k chunks it belongs in Postgres.
 3. **Reciprocal Rank Fusion** with `k=60`, which fuses two rankings without needing to
    normalise incomparable score scales.
-4. **Cross-encoder rerank**. Ollama exposes `logprobs` and `top_logprobs`, so
-   Qwen3-Reranker-0.6B runs as a true cross-encoder: one forward pass per candidate,
-   generating a single token, reading `P("yes")` out of the top-logprob distribution.
-   This yields calibrated relevance probabilities with no PyTorch dependency.
+4. **Cross-encoder rerank**. Ollama exposes `logprobs` and `top_logprobs`, so any causal
+   model becomes a scorer: constrain generation to a single token, read `P("yes")` out of
+   the top-logprob distribution, renormalise over the yes and no mass. Calibrated
+   relevance probabilities with no PyTorch dependency.
+
+   The intended model was Qwen3-Reranker-0.6B. **It does not work.** The only community
+   GGUF on Ollama (`dengcao/Qwen3-Reranker-0.6B:Q8_0`) returns a uniform distribution for
+   every input, including a plain "The capital of France is" probe, where all top
+   logprobs come back identical at -11.93. That build targets vLLM sequence
+   classification and the conversion lost the head. Measured and rejected.
+
+   `qwen3:8b` serves as the cross-encoder instead, scoring roughly 165ms per candidate
+   and separating relevant from irrelevant cleanly (`yes` at -0.0 against `no` at -27.1
+   on a positive pair). It is already resident for generation, so this removes 639MB of
+   weights rather than adding them. Two details are load-bearing: `think` must be false,
+   or a Qwen3 model spends its single token on `<think>`; and the system prompt goes in
+   Ollama's `system` field rather than a hand-written `<|im_start|>` template, because a
+   manual template without `raw: true` gets wrapped a second time.
 5. **Parent expansion**: winning propositions map up to their parent sections, deduped,
    preserving best rank.
 

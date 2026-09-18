@@ -151,10 +151,8 @@ class PostgresStore:
         )
 
     def upsert(self, chunks: list[Chunk], vectors: Vector) -> None:
-        rows = [
-            (*_chunk_to_row(chunk), _to_pgvector(vector))
-            for chunk, vector in zip(chunks, vectors, strict=True)
-        ]
+        matrix = np.asarray(vectors, dtype=np.float32).reshape(len(chunks), -1)
+        rows = [(*_chunk_to_row(chunk), _to_pgvector(matrix[i])) for i, chunk in enumerate(chunks)]
         updates = ", ".join(
             f"{column.strip()} = EXCLUDED.{column.strip()}"
             for column in _COLUMNS.split(",")

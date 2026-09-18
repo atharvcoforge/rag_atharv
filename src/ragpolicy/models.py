@@ -117,21 +117,29 @@ class OllamaClient:
 
     # -- scoring -------------------------------------------------------------------
 
-    def yes_probability(self, prompt: str, model: str | None = None) -> float:
+    def yes_probability(
+        self, prompt: str, *, system: str | None = None, model: str | None = None
+    ) -> float:
         """P(yes) from the first generated token, renormalised over yes and no mass.
 
         Renormalising rather than reading the raw probability matters: a model that puts
         0.4 on yes, 0.4 on no, and 0.2 elsewhere is undecided, and should score 0.5 rather
         than 0.4. Returns 0.5 when the model commits to neither.
+
+        ``think`` must be off. With thinking enabled a Qwen3 model spends its first token
+        on ``<think>`` and the yes/no distribution never appears.
         """
-        payload = {
+        payload: dict[str, Any] = {
             "model": model or self.rerank_model,
             "prompt": prompt,
             "stream": False,
             "logprobs": True,
             "top_logprobs": 20,
-            "options": {"num_predict": 1, "temperature": 0},
+            "think": False,
+            "options": {"num_predict": 1, "temperature": 0, "seed": 0},
         }
+        if system is not None:
+            payload["system"] = system
         entries = self._post("/api/generate", payload).get("logprobs") or []
         if not entries:
             return 0.5

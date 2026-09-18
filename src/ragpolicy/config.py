@@ -35,7 +35,9 @@ class Settings:
         return Settings(
             ollama_base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434").rstrip("/"),
             embed_model=os.getenv("EMBED_MODEL", "qwen3-embedding:0.6b"),
-            rerank_model=os.getenv("RERANK_MODEL", "dengcao/Qwen3-Reranker-0.6B:Q8_0"),
+            # Qwen3-Reranker's community GGUF is degenerate on Ollama (uniform logprobs
+            # for any input), so the generation model doubles as the cross-encoder.
+            rerank_model=os.getenv("RERANK_MODEL", "qwen3:8b"),
             gen_model=os.getenv("GEN_MODEL", "qwen3:8b"),
             vector_store=os.getenv("VECTOR_STORE", "postgres"),
             postgres_dsn=os.getenv("POSTGRES_DSN", "postgresql://rag:rag@localhost:5433/ragpolicy"),

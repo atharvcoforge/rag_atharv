@@ -12,6 +12,7 @@ import os
 from collections.abc import Iterator
 
 import numpy as np
+import numpy.typing as npt
 import pytest
 
 from ragpolicy.ingest import Chunk
@@ -36,9 +37,10 @@ def chunk(chunk_id: str, section: str, text: str, kind: str = "section") -> Chun
     )
 
 
-def unit(*values: float) -> np.ndarray:
+def unit(*values: float) -> npt.NDArray[np.float32]:
     vector = np.asarray(values, dtype=np.float32)
-    return vector / np.linalg.norm(vector)
+    normalised: npt.NDArray[np.float32] = vector / np.linalg.norm(vector)
+    return normalised
 
 
 FIXTURE = [

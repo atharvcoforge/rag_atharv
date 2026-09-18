@@ -189,6 +189,15 @@ def test_yes_probability_requests_a_single_deterministic_token(tmp_path: Path) -
     assert body["options"]["num_predict"] == 1
     assert body["options"]["temperature"] == 0
     assert body["stream"] is False
+    # With thinking on, a Qwen3 model burns its only token on "<think>".
+    assert body["think"] is False
+
+
+def test_yes_probability_passes_the_system_prompt_through(tmp_path: Path) -> None:
+    client, seen = make_client(logprob_handler([(" Yes", math.log(0.99))]), tmp_path)
+    client.yes_probability("q", system="you are a judge")
+
+    assert seen[0]["body"]["system"] == "you are a judge"
 
 
 def test_generate_returns_the_response_text(tmp_path: Path) -> None:
