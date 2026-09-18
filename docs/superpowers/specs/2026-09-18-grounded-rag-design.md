@@ -179,9 +179,10 @@ Metrics: Recall@1, Recall@3, MRR, nDCG@3, citation exactness, answer correctness
 abstention precision and recall, false-answer rate on unanswerable questions, hallucinated
 citation rate, and p50/p95 latency per pipeline stage.
 
-`rag eval --ablate` sweeps configurations (dense only, plus BM25, plus rerank, plus HyDE,
-plus verifier, full) and writes a markdown comparison to `reports/`. Model calls are
-recorded to cassettes so tests and CI run hermetically without Ollama.
+`rag eval --ablate` sweeps dense / +bm25 / +rerank / full / full-no-bm25 / bm25-only
+and writes `reports/ablation.md`. HyDE was in that sweep, raised false answers, and
+was deleted from the pipeline. Tests and CI are hermetic (mocked Ollama, NumPy store);
+they do not replay model cassettes.
 
 ## Non-goals
 

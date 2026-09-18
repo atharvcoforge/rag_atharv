@@ -254,7 +254,7 @@ def test_eval_latest_is_empty_when_no_sweep_has_run(
 ) -> None:
     monkeypatch.setattr(api, "ABLATION_REPORT", tmp_path / "missing.json")
 
-    assert client.get("/api/eval/latest").json() == {"configs": {}}
+    assert client.get("/api/eval/latest").json() == {}
 
 
 def test_eval_latest_returns_the_report(

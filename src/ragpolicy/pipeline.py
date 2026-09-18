@@ -27,11 +27,6 @@ from ragpolicy.retrieve import (
 )
 from ragpolicy.store import Hit, VectorStore, open_store
 
-HYDE_SYSTEM = (
-    "You write a single sentence in the style of a corporate expense policy that would "
-    "answer the user's question. Invent plausible specifics. Output the sentence only."
-)
-
 
 @dataclass(frozen=True, slots=True)
 class RetrievalConfig:
@@ -40,7 +35,6 @@ class RetrievalConfig:
     dense: bool = True
     bm25: bool = True
     rerank: bool = True
-    hyde: bool = False
     verify: bool = True
     candidates: int = 12
     # Reranking costs ~153ms per candidate and cannot be parallelised, so this number is
@@ -58,7 +52,6 @@ ABLATIONS: dict[str, RetrievalConfig] = {
     # Isolates BM25's contribution with rerank and verification switched on. Without
     # this row the sweep cannot say whether the lexical half is carrying its weight.
     "full-no-bm25": RetrievalConfig(bm25=False),
-    "full+hyde": RetrievalConfig(hyde=True),
     "bm25-only": RetrievalConfig(dense=False, rerank=False, verify=False),
 }
 
@@ -122,10 +115,7 @@ class Pipeline:
 
         if self.config.dense:
             started = time.perf_counter()
-            query = question
-            if self.config.hyde:
-                query = f"{question}\n{self._hyde(question)}"
-            vector = self.client.embed_query(query)
+            vector = self.client.embed_query(question)
             dense_hits = [
                 hit
                 for hit in self.store.search(vector, limit=self.config.candidates * 2)
@@ -210,15 +200,6 @@ class Pipeline:
         return float(
             self.client.yes_probability(rerank_prompt(question, excerpt), system=RERANK_SYSTEM)
         )
-
-    def _hyde(self, question: str) -> str:
-        """Hypothetical Document Embeddings: search with an imagined answer.
-
-        A fabricated policy sentence sits closer in embedding space to the real policy
-        sentence than a question does, because questions and statements are written
-        differently. Whether that helps *here* is what the ablation decides.
-        """
-        return self.client.generate(question, system=HYDE_SYSTEM, num_predict=64).strip()
 
 
 def build(settings: Settings | None = None, **kwargs: Any) -> Pipeline:

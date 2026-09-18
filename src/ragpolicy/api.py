@@ -128,7 +128,7 @@ def health(build: PipelineFor) -> dict[str, Any]:
 def eval_latest() -> dict[str, Any]:
     """The last ablation sweep, or an empty table when nobody has run one yet."""
     if not ABLATION_REPORT.exists():
-        return {"configs": {}}
+        return {}
     loaded: dict[str, Any] = json.loads(ABLATION_REPORT.read_text(encoding="utf-8"))
     return loaded
 

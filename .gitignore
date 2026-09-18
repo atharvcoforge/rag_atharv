@@ -26,3 +26,8 @@ ui/node_modules/
 ui/.next/
 ui/out/
 ui/.turbo/
+
+# Eval scratch
+reports/*.bak
+reports/ablation.log
+
