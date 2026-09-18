@@ -1,0 +1,19 @@
+{
+  "tau": 2e-05,
+  "delta": 0.0,
+  "entailment": 0.5,
+  "fitted_on": {
+    "dev_cases": 24,
+    "holdout_cases": 24,
+    "dev": {
+      "decision_accuracy": 0.9583,
+      "false_answer_rate": 0.1111,
+      "false_refusal_rate": 0.0
+    },
+    "holdout": {
+      "decision_accuracy": 0.9583,
+      "false_answer_rate": 0.1111,
+      "false_refusal_rate": 0.0
+    }
+  }
+}

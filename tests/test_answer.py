@@ -55,7 +55,7 @@ class StubClient:
 
 def make_answerer(client: StubClient, **overrides: float) -> Answerer:
     return Answerer(
-        client=client,  # type: ignore[arg-type]
+        client=client,
         raw_policy=RAW,
         corpus=CORPUS,
         thresholds=Thresholds(**overrides) if overrides else Thresholds(),
@@ -306,6 +306,26 @@ def test_a_quote_absent_from_the_evidence_is_refused() -> None:
 
     assert response.answer == REFUSAL
     assert response.trace["abstained_at"] == "quote"
+
+
+def test_a_quote_spanning_two_sentences_matches_across_the_newline() -> None:
+    """The policy separates sentences with newlines; models join them with a space."""
+    client = StubClient(
+        {
+            "answer": "Economy only, unless a VP approves in writing.",
+            "section": "3",
+            "governing_rule": (
+                "Employees must purchase economy airfare. Business-class airfare "
+                "requires written approval from a vice president."
+            ),
+        }
+    )
+    answerer = make_answerer(client, tau=0.1, delta=0.0)
+    response = answerer.answer("what class?", [scored("expense-policy:v2.0:section-3", 0.9)])
+
+    assert response.answer == "Economy only, unless a VP approves in writing."
+    span = response.trace["spans"][0]
+    assert RAW[span["start"] : span["end"]] == BY_ID["expense-policy:v2.0:section-3"].text
 
 
 def test_an_empty_quote_is_refused() -> None:

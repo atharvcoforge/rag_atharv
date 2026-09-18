@@ -17,6 +17,7 @@ Refusing well is the hard requirement. Two independent gates handle it:
 from __future__ import annotations
 
 import json
+import re
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -115,20 +116,27 @@ def verify_spans(raw: str, evidence: Sequence[Evidence]) -> bool:
 
 
 def locate_quote(quote: str, hits: Sequence[ScoredHit]) -> tuple[ScoredHit, int, int] | None:
-    """Find a model-supplied quote verbatim inside the retrieved excerpts.
+    """Find a model-supplied quote inside the retrieved excerpts.
 
     A quote that is not in the evidence is a fabrication, and returning ``None`` here is
     what turns that into a refusal. When it is found, its position gives a sentence-level
     citation span rather than a whole-section one.
+
+    Matching is whitespace-insensitive, which is not a loosening of the check. The policy
+    separates sentences with newlines; models quoting two of them join with a space. An
+    exact ``str.find`` rejected "Employees must purchase economy airfare. Business-class
+    airfare requires written approval from a vice president." purely over a ``\\n``, and
+    that alone produced false refusals on genuinely answerable questions. Every word
+    still has to appear, in order, in retrieved evidence.
     """
-    needle = quote.strip()
-    if not needle:
+    words = quote.split()
+    if not words:
         return None
+    pattern = re.compile(r"\s+".join(re.escape(word) for word in words))
     for hit in hits:
-        offset = hit.chunk.text.find(needle)
-        if offset != -1:
-            start = hit.chunk.start + offset
-            return hit, start, start + len(needle)
+        found = pattern.search(hit.chunk.text)
+        if found is not None:
+            return hit, hit.chunk.start + found.start(), hit.chunk.start + found.end()
     return None
 
 
@@ -224,8 +232,10 @@ class Answerer:
             return self._refuse(trace, "quote", chunks, started)
 
         cited, quote_start, quote_end = located
-        evidence = [Evidence(cited.chunk, quote_start, quote_end, rule.strip())]
-        trace["governing_rule"] = rule.strip()
+        # Store the document's own wording, not the model's paraphrased whitespace, so
+        # the span and the text agree byte for byte.
+        evidence = [Evidence(cited.chunk, quote_start, quote_end, self.raw[quote_start:quote_end])]
+        trace["governing_rule"] = evidence[0].quote
 
         if not verify_spans(self.raw, evidence):
             return self._refuse(trace, "span", chunks, started)

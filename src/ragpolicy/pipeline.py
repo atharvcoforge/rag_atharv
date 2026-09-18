@@ -12,8 +12,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-import numpy as np
-
 from ragpolicy.answer import Answerer, Response, Thresholds
 from ragpolicy.config import Settings
 from ragpolicy.ingest import build_corpus, contextual_text
@@ -57,6 +55,9 @@ ABLATIONS: dict[str, RetrievalConfig] = {
     "dense+bm25": RetrievalConfig(rerank=False, verify=False),
     "dense+bm25+rerank": RetrievalConfig(verify=False),
     "full": RetrievalConfig(),
+    # Isolates BM25's contribution with rerank and verification switched on. Without
+    # this row the sweep cannot say whether the lexical half is carrying its weight.
+    "full-no-bm25": RetrievalConfig(bm25=False),
     "full+hyde": RetrievalConfig(hyde=True),
     "bm25-only": RetrievalConfig(dense=False, rerank=False, verify=False),
 }
@@ -156,6 +157,7 @@ class Pipeline:
             Stage("fuse", (time.perf_counter() - started) * 1000, {"candidates": len(candidates)})
         )
 
+        scored: list[ScoredHit]
         if self.config.rerank:
             started = time.perf_counter()
             scored = rerank(question, candidates, scorer=self._relevance)
@@ -176,10 +178,10 @@ class Pipeline:
             [Hit(chunk=s.chunk, distance=s.distance) for s in scored], self.corpus
         )
         best: dict[str, ScoredHit] = {}
-        for hit in scored:
-            parent = hit.chunk.parent_chunk_id or hit.chunk.chunk_id
+        for ranked in scored:
+            parent = ranked.chunk.parent_chunk_id or ranked.chunk.chunk_id
             if parent not in best:
-                best[parent] = hit
+                best[parent] = ranked
         expanded = [
             ScoredHit(
                 chunk=section,
@@ -221,7 +223,3 @@ class Pipeline:
 
 def build(settings: Settings | None = None, **kwargs: Any) -> Pipeline:
     return Pipeline(settings or Settings.from_env(), **kwargs)
-
-
-def cosine_distance(a: np.ndarray, b: np.ndarray) -> float:
-    return float(1.0 - np.dot(a, b))
