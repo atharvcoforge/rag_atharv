@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import numpy as np
+import numpy.typing as npt
 
 from ragpolicy.config import REPO_ROOT, Settings
 from ragpolicy.ingest import parse_sections
@@ -19,7 +20,7 @@ class StubEmbedClient:
     def __init__(self) -> None:
         self.embed_calls: list[list[str]] = []
 
-    def embed_documents(self, texts: list[str]) -> np.ndarray:
+    def embed_documents(self, texts: list[str]) -> npt.NDArray[np.float32]:
         self.embed_calls.append(list(texts))
         rows = []
         for text in texts:
@@ -39,7 +40,7 @@ class StubEmbedClient:
             rows.append(vec)
         return np.vstack(rows)
 
-    def embed_query(self, query: str) -> np.ndarray:
+    def embed_query(self, query: str) -> npt.NDArray[np.float32]:
         mapping = {
             "food": 0,
             "hotel": 1,

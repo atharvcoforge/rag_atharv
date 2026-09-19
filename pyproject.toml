@@ -23,6 +23,7 @@ dev = [
     "mypy==1.14.1",
     "pytest==8.3.4",
     "pytest-asyncio==0.25.2",
+    "pytest-cov>=7.1.0",
     "ruff==0.8.6",
     "types-pyyaml==6.0.12.20241230",
 ]
@@ -35,11 +36,20 @@ build-backend = "hatchling.build"
 packages = ["src/ragpolicy"]
 
 [tool.pytest.ini_options]
-addopts = "-q"
+addopts = "-q --cov=ragpolicy --cov-report=term-missing --cov-fail-under=95"
 testpaths = ["tests"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 markers = ["live: requires a running Ollama or Postgres instance"]
+
+[tool.coverage.run]
+source = ["ragpolicy"]
+branch = false
+
+[tool.coverage.report]
+fail_under = 95
+show_missing = true
+skip_empty = true
 
 [tool.ruff]
 line-length = 100

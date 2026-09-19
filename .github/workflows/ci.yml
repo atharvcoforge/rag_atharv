@@ -24,4 +24,5 @@ jobs:
 
       - run: uv run mypy
 
+      # Coverage gate (≥95%) is enforced via pyproject.toml addopts.
       - run: uv run pytest

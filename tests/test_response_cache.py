@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 from ragpolicy.pipeline import RetrievalConfig
 from ragpolicy.response_cache import AnswerCache, normalise_question
@@ -15,7 +16,12 @@ def test_normalise_folds_case_and_whitespace() -> None:
 def test_cache_round_trips_a_payload(tmp_path: Path) -> None:
     cache = AnswerCache(tmp_path / "answers.sqlite")
     config = RetrievalConfig()
-    payload = {"answer": "No.", "citation": None, "retrieved_chunks": [], "trace": {}}
+    payload: dict[str, Any] = {
+        "answer": "No.",
+        "citation": None,
+        "retrieved_chunks": [],
+        "trace": {},
+    }
 
     assert cache.get("wine?", config) is None
     cache.put("Wine ?", config, payload)
@@ -24,7 +30,12 @@ def test_cache_round_trips_a_payload(tmp_path: Path) -> None:
 
 def test_different_retrieval_configs_do_not_share_an_entry(tmp_path: Path) -> None:
     cache = AnswerCache(tmp_path / "answers.sqlite")
-    payload = {"answer": "No.", "citation": None, "retrieved_chunks": [], "trace": {}}
+    payload: dict[str, Any] = {
+        "answer": "No.",
+        "citation": None,
+        "retrieved_chunks": [],
+        "trace": {},
+    }
     cache.put("wine?", RetrievalConfig(), payload)
 
     assert cache.get("wine?", RetrievalConfig(rerank=False)) is None

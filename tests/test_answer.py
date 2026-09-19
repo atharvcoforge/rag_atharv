@@ -398,9 +398,7 @@ def test_first_class_plus_business_rule_is_refused_even_if_entailment_is_high() 
     from ragpolicy.answer import peer_rule_mismatch
 
     rule = "Business-class airfare requires written approval from a vice president."
-    answer = (
-        "You cannot book first-class airfare without written approval from a vice president."
-    )
+    answer = "You cannot book first-class airfare without written approval from a vice president."
     assert peer_rule_mismatch("Can I book first-class airfare?", rule, answer) is True
 
     client = StubClient(
@@ -426,9 +424,7 @@ def test_sibling_sentence_recovery_when_model_quotes_the_limit_not_the_approval(
             "section": "2",
             "governing_rule": "Hotels are reimbursable up to $225 per night.",
         },
-        entailment=lambda prompt: (
-            0.99 if "manager must approve" in prompt.lower() else 0.01
-        ),
+        entailment=lambda prompt: (0.99 if "manager must approve" in prompt.lower() else 0.01),
     )
     answerer = make_answerer(client, tau=0.1, delta=0.0, entailment=0.5)
     response = answerer.answer(
@@ -542,3 +538,66 @@ def test_malformed_generation_falls_back_to_refusing(malformed: str) -> None:
     response = answerer.answer("q", [scored("expense-policy:v2.0:section-1", 0.9)])
 
     assert response.answer == REFUSAL
+
+
+def test_multi_sentence_quote_refuses_when_verify_is_off() -> None:
+    both = (
+        "Employees must purchase economy airfare. Business-class airfare "
+        "requires written approval from a vice president."
+    )
+    client = StubClient(
+        {
+            "answer": "Economy is required.",
+            "section": "3",
+            "governing_rule": both,
+        }
+    )
+    answerer = Answerer(
+        client=client,
+        raw_policy=RAW,
+        corpus=CORPUS,
+        thresholds=Thresholds(tau=0.1),
+        verify=False,
+    )
+    # Avoid "first-class" so peer_rule cannot fire before the multi-sentence gate.
+    response = answerer.answer("what cabin?", [scored("expense-policy:v2.0:section-3", 0.9)])
+    assert response.answer == REFUSAL
+    assert response.trace["abstained_at"] == "quote"
+
+
+def test_multi_sentence_quote_refuses_when_no_sentence_entails() -> None:
+    both = (
+        "Employees must purchase economy airfare. Business-class airfare "
+        "requires written approval from a vice president."
+    )
+    client = StubClient(
+        {
+            "answer": "Economy is required.",
+            "section": "3",
+            "governing_rule": both,
+        },
+        entailment=0.01,
+    )
+    response = make_answerer(client, tau=0.1, entailment=0.5).answer(
+        "what class?", [scored("expense-policy:v2.0:section-3", 0.9)]
+    )
+    assert response.answer == REFUSAL
+    assert response.trace["abstained_at"] == "verification"
+
+
+def test_peer_rule_mismatch_refuses_business_class_borrow() -> None:
+    client = StubClient(
+        {
+            "answer": "Yes, with vice president approval.",
+            "section": "3",
+            "governing_rule": (
+                "Business-class airfare requires written approval from a vice president."
+            ),
+        }
+    )
+    response = make_answerer(client, tau=0.1).answer(
+        "Can I book first-class airfare?",
+        [scored("expense-policy:v2.0:section-3", 0.9)],
+    )
+    assert response.answer == REFUSAL
+    assert response.trace["abstained_at"] == "peer_rule"
