@@ -14,7 +14,7 @@ from typing import Any
 
 from ragpolicy.answer import Answerer, Response, Thresholds
 from ragpolicy.config import Settings
-from ragpolicy.ingest import build_corpus, contextual_text
+from ragpolicy.ingest import Chunk, build_corpus, contextual_text
 from ragpolicy.models import OllamaClient
 from ragpolicy.retrieve import (
     BM25,
@@ -25,7 +25,7 @@ from ragpolicy.retrieve import (
     rerank,
     rerank_prompt,
 )
-from ragpolicy.store import Hit, VectorStore, open_store
+from ragpolicy.store import Hit, NumpyStore, VectorStore, open_store
 
 
 @dataclass(frozen=True, slots=True)
@@ -42,6 +42,8 @@ class RetrievalConfig:
     # answer survives fusion at all.
     rerank_candidates: int = 6
     final_sections: int = 3
+    # Lab contract adapter: six bare section vectors, dense cosine LIMIT 3, no hybrid.
+    lab: bool = False
 
 
 ABLATIONS: dict[str, RetrievalConfig] = {
@@ -53,6 +55,16 @@ ABLATIONS: dict[str, RetrievalConfig] = {
     # this row the sweep cannot say whether the lexical half is carrying its weight.
     "full-no-bm25": RetrievalConfig(bm25=False),
     "bm25-only": RetrievalConfig(dense=False, rerank=False, verify=False),
+    # Assignment contract path. Does not replace ``full``; use ``--config lab``.
+    "lab": RetrievalConfig(
+        lab=True,
+        bm25=False,
+        rerank=False,
+        verify=True,
+        candidates=3,
+        rerank_candidates=3,
+        final_sections=3,
+    ),
 }
 
 
@@ -86,6 +98,7 @@ class Pipeline:
         self.store = (
             store if store is not None else open_store(settings.postgres_dsn, settings.vector_store)
         )
+        self._lab_store: NumpyStore | None = None
         self.bm25 = BM25([c for c in self.corpus if c.kind == "proposition"])
         self.answerer = Answerer(
             client=self.client,
@@ -95,19 +108,48 @@ class Pipeline:
             verify=self.config.verify,
         )
 
+    @property
+    def sections(self) -> list[Chunk]:
+        return [c for c in self.corpus if c.kind == "section"]
+
     # -- indexing ------------------------------------------------------------------
 
     def index(self) -> int:
-        """Embed and store the whole corpus. Cached embeddings make a rebuild near-free."""
+        """Embed and store the corpus. Lab mode writes the six bare section chunks only."""
+        if self.config.lab:
+            return self._index_lab(self.store)
+
         texts = [contextual_text(chunk) for chunk in self.corpus]
         vectors = self.client.embed_documents(texts)
         self.store.create(dim=int(vectors.shape[1]))
         self.store.upsert(self.corpus, vectors)
         return len(self.corpus)
 
+    def ensure_lab_store(self) -> NumpyStore:
+        """Ephemeral six-section store for ``--config lab`` ask/eval without wiping full."""
+        if self._lab_store is not None:
+            return self._lab_store
+        store = NumpyStore()
+        self._index_lab(store)
+        self._lab_store = store
+        return store
+
+    def _index_lab(self, store: VectorStore) -> int:
+        sections = [c for c in self.corpus if c.kind == "section"]
+        texts = [chunk.text for chunk in sections]
+        vectors = self.client.embed_documents(texts)
+        store.create(dim=int(vectors.shape[1]))
+        store.upsert(sections, vectors)
+        if isinstance(store, NumpyStore):
+            self._lab_store = store
+        return len(sections)
+
     # -- querying ------------------------------------------------------------------
 
     def retrieve(self, question: str) -> tuple[list[ScoredHit], list[Stage]]:
+        if self.config.lab:
+            return self._retrieve_lab(question)
+
         stages: list[Stage] = []
         propositions = {c.chunk_id: c for c in self.corpus if c.kind == "proposition"}
         rankings: list[list[str]] = []
@@ -185,6 +227,25 @@ class Pipeline:
             Stage("expand", (time.perf_counter() - started) * 1000, {"sections": len(expanded)})
         )
         return expanded, stages
+
+    def _retrieve_lab(self, question: str) -> tuple[list[ScoredHit], list[Stage]]:
+        """Dense cosine over the six bare section vectors, ascending distance, LIMIT 3."""
+        started = time.perf_counter()
+        store = self.ensure_lab_store()
+        vector = self.client.embed_query(question)
+        hits = store.search(vector, limit=self.config.final_sections)
+        scored = [
+            ScoredHit(
+                chunk=hit.chunk,
+                distance=hit.distance,
+                score=max(0.0, 1.0 - hit.distance),
+            )
+            for hit in hits
+        ]
+        stages = [
+            Stage("dense", (time.perf_counter() - started) * 1000, {"hits": len(scored)})
+        ]
+        return scored, stages
 
     def ask(self, question: str) -> Response:
         started = time.perf_counter()

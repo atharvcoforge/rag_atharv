@@ -54,11 +54,25 @@ Docker Desktop for Postgres. Node 22 is only needed for the UI
 cp .env.example .env
 docker compose up -d
 uv sync
-uv run rag index
+uv run rag index                 # full corpus (sections + propositions, contextual embeds)
 uv run rag ask "Can I expense wine with dinner?"
-uv run rag eval --ablate          # writes reports/ablation.json
+uv run rag eval --ablate         # writes reports/ablation.json
 uv run uvicorn ragpolicy.api:app --reload --port 8000
 ```
+
+### Lab contract path (assignment checklist)
+
+Production default is `full`. The Mini RAG Lab brief wants six bare section chunks and
+plain cosine `LIMIT 3`. That lives behind `--config lab` / `--lab` and does not replace
+the measured pipeline:
+
+```bash
+uv run rag index --lab           # optional: write exactly 6 bare section vectors
+uv run rag ask --config lab "Can I book first-class airfare?"
+uv run rag lab-six               # writes reports/lab-six-questions.json
+```
+
+`lab` ask builds an ephemeral six-section store so it does not wipe a full Postgres index.
 
 UI, in another terminal:
 

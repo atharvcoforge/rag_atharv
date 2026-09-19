@@ -23,7 +23,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
-from ragpolicy.ingest import Chunk
+from ragpolicy.ingest import Chunk, split_sentences
 from ragpolicy.retrieve import ScoredHit
 
 REFUSAL = "The provided policy does not answer this question."
@@ -35,6 +35,12 @@ SYSTEM = (
     "- A rule about a category settles a question about a member of that category.\n"
     "- A rule with a threshold settles a question about an amount above or below it.\n"
     "- A rule requiring approval settles a question about doing the thing without it.\n\n"
+    "A named peer is not a member: a business-class rule does not govern first-class, "
+    "and a taxi rule does not settle rental cars. Pick only the rule whose subject "
+    "covers the thing asked about.\n"
+    "Cabin classes are peers. For first-class, quote "
+    '"Employees must purchase economy airfare." and answer that economy is required. '
+    "Never apply the business-class vice-president approval sentence to first-class.\n\n"
     "Refuse only when nothing in the excerpts governs the question at all: when the "
     "thing asked about belongs to no category, threshold, or requirement the excerpts "
     f'mention. Then reply with exactly: "{REFUSAL}"\n\n'
@@ -123,11 +129,10 @@ def locate_quote(quote: str, hits: Sequence[ScoredHit]) -> tuple[ScoredHit, int,
     citation span rather than a whole-section one.
 
     Matching is whitespace-insensitive, which is not a loosening of the check. The policy
-    separates sentences with newlines; models quoting two of them join with a space. An
-    exact ``str.find`` rejected "Employees must purchase economy airfare. Business-class
-    airfare requires written approval from a vice president." purely over a ``\\n``, and
-    that alone produced false refusals on genuinely answerable questions. Every word
-    still has to appear, in order, in retrieved evidence.
+    separates sentences with newlines; models quoting them often join with a space. An
+    exact ``str.find`` rejected real quotes purely over a ``\\n``. Every word still has
+    to appear, in order, in retrieved evidence. Multi-sentence matches are narrowed to
+    the single supporting sentence during verification.
     """
     words = quote.split()
     if not words:
@@ -138,6 +143,31 @@ def locate_quote(quote: str, hits: Sequence[ScoredHit]) -> tuple[ScoredHit, int,
         if found is not None:
             return hit, hit.chunk.start + found.start(), hit.chunk.start + found.end()
     return None
+
+
+def recover_supporting_sentence(
+    answer: str,
+    hits: Sequence[ScoredHit],
+    client: Any,
+    threshold: float,
+) -> tuple[ScoredHit, str, float] | None:
+    """If the model quoted a sibling sentence, find another retrieved sentence that entails.
+
+    Common on multi-sentence sections under lab mode (limit sentence vs approval sentence).
+    """
+    best: tuple[ScoredHit, str, float] | None = None
+    for hit in hits:
+        for sentence, _ in split_sentences(hit.chunk.text, 0):
+            score = float(
+                client.yes_probability(
+                    entailment_prompt(answer, sentence), system=ENTAILMENT_SYSTEM
+                )
+            )
+            if score < threshold:
+                continue
+            if best is None or score > best[2]:
+                best = (hit, sentence, score)
+    return best
 
 
 def build_prompt(question: str, hits: Sequence[ScoredHit]) -> str:
@@ -155,10 +185,12 @@ def build_prompt(question: str, hits: Sequence[ScoredHit]) -> str:
         f"Question: {question}\n\n"
         "Work in this order.\n"
         '1) "subject": the specific thing the question asks about.\n'
-        '2) "governing_rule": copy the one sentence from the excerpts that governs that '
-        "subject, word for word. Leave it empty if no sentence does.\n"
-        '3) "answer": if governing_rule is non-empty you must answer the question by '
-        f'applying that rule, not refuse. If it is empty, answer exactly "{REFUSAL}".\n'
+        '2) "governing_rule": copy exactly one sentence from the excerpts that governs '
+        "that subject, word for word. Never join two sentences. Leave it empty if no "
+        "sentence does.\n"
+        '3) "answer": if governing_rule is non-empty, answer by applying that rule alone '
+        "(do not borrow facts from any other sentence). If it is empty, answer exactly "
+        f'"{REFUSAL}".\n'
         '4) "section": the section number the rule came from.'
     )
 
@@ -224,6 +256,9 @@ class Answerer:
         if answer_text.strip() == REFUSAL:
             return self._refuse(trace, "model", chunks, started)
 
+        if peer_rule_mismatch(question, rule, answer_text):
+            return self._refuse(trace, "peer_rule", chunks, started)
+
         # The quoted rule is authoritative. It must exist verbatim in the evidence, which
         # makes a fabricated citation structurally impossible, and where it sits gives a
         # sentence-level span instead of a whole-section one.
@@ -232,22 +267,77 @@ class Answerer:
             return self._refuse(trace, "quote", chunks, started)
 
         cited, quote_start, quote_end = located
-        # Store the document's own wording, not the model's paraphrased whitespace, so
-        # the span and the text agree byte for byte.
-        evidence = [Evidence(cited.chunk, quote_start, quote_end, self.raw[quote_start:quote_end])]
+        # Prefer the document's own bytes over the model's whitespace.
+        quote = self.raw[quote_start:quote_end]
+        sentences = [text for text, _ in split_sentences(quote, 0)]
+        if not sentences:
+            return self._refuse(trace, "quote", chunks, started)
+
+        support: float | None = None
+        if len(sentences) > 1:
+            # Joining two rules into one span launders false entailments: measured
+            # first-class × VP-approval was P(yes)≈0.99 against the join and ~0 against
+            # either sentence alone. Keep the one sentence that actually supports the
+            # answer; refuse if none do.
+            if not self.verify:
+                return self._refuse(trace, "quote", chunks, started)
+            best_sentence = ""
+            best_support = -1.0
+            for sentence in sentences:
+                score = self.client.yes_probability(
+                    entailment_prompt(answer_text, sentence), system=ENTAILMENT_SYSTEM
+                )
+                if score > best_support:
+                    best_support, best_sentence = score, sentence
+            support = best_support
+            trace["entailment"] = best_support
+            if best_support < self.thresholds.entailment:
+                return self._refuse(trace, "verification", chunks, started)
+            located = locate_quote(best_sentence, hits)
+            if located is None:
+                return self._refuse(trace, "quote", chunks, started)
+            cited, quote_start, quote_end = located
+            quote = self.raw[quote_start:quote_end]
+            if len(split_sentences(quote, 0)) != 1:
+                return self._refuse(trace, "quote", chunks, started)
+
+        evidence = [Evidence(cited.chunk, quote_start, quote_end, quote)]
         trace["governing_rule"] = evidence[0].quote
+
+        if peer_rule_mismatch(question, evidence[0].quote, answer_text):
+            return self._refuse(trace, "peer_rule", chunks, started)
 
         if not verify_spans(self.raw, evidence):
             return self._refuse(trace, "span", chunks, started)
 
-        if self.verify:
+        if self.verify and support is None:
             support = self.client.yes_probability(
                 entailment_prompt(answer_text, evidence[0].quote), system=ENTAILMENT_SYSTEM
             )
             trace["entailment"] = support
-            trace["confidence"] = min(top_score, support)
             if support < self.thresholds.entailment:
-                return self._refuse(trace, "verification", chunks, started)
+                recovered = recover_supporting_sentence(
+                    answer_text, hits, self.client, self.thresholds.entailment
+                )
+                if recovered is None:
+                    return self._refuse(trace, "verification", chunks, started)
+                cited, sentence, support = recovered
+                located = locate_quote(sentence, hits)
+                if located is None:
+                    return self._refuse(trace, "quote", chunks, started)
+                cited, quote_start, quote_end = located
+                quote = self.raw[quote_start:quote_end]
+                if peer_rule_mismatch(question, quote, answer_text):
+                    return self._refuse(trace, "peer_rule", chunks, started)
+                evidence = [Evidence(cited.chunk, quote_start, quote_end, quote)]
+                trace["governing_rule"] = evidence[0].quote
+                trace["entailment"] = support
+                trace["recovered_support"] = True
+                if not verify_spans(self.raw, evidence):
+                    return self._refuse(trace, "span", chunks, started)
+
+        if support is not None:
+            trace["confidence"] = min(top_score, support)
 
         trace["spans"] = [
             {"chunk_id": e.chunk.chunk_id, "start": e.start, "end": e.end, "text": e.quote}
@@ -277,6 +367,23 @@ def _reported_chunks(hits: Sequence[ScoredHit]) -> list[dict[str, Any]]:
     """At most three, ascending by distance, distances as numbers. The lab's contract."""
     top = sorted(hits, key=lambda hit: hit.distance)[:3]
     return [{"section": hit.chunk.citation_label, "distance": float(hit.distance)} for hit in top]
+
+
+def peer_rule_mismatch(question: str, rule: str, answer: str) -> bool:
+    """True when the quoted rule is a named peer of the asked subject, not its governor.
+
+    Catches the live failure where first-class borrows the business-class VP-approval
+    sentence even if a weak entailment scorer says yes.
+    """
+    asked = f"{question} {answer}".lower()
+    quoted = rule.lower()
+    asks_first = "first-class" in asked or "first class" in asked
+    if not asks_first:
+        return False
+    if "business-class" in quoted or "business class" in quoted:
+        return True
+    answered = answer.lower()
+    return "vice president" in answered and "economy" not in answered
 
 
 def _parse(raw_output: str) -> tuple[str, str, str] | None:

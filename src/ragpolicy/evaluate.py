@@ -216,6 +216,9 @@ def run_ablation(settings: Settings, limit: int = 0) -> dict[str, dict[str, Any]
         table = json.loads(checkpoint.read_text(encoding="utf-8"))
 
     for position, (name, config) in enumerate(ABLATIONS.items(), start=1):
+        if name == "lab":
+            # Lab is a contract adapter, not an ablation row.
+            continue
         if name in table:
             print(f"=== [{position}/{len(ABLATIONS)}] {name} (cached)", flush=True)
             continue
@@ -379,3 +382,94 @@ def _markdown_table(table: dict[str, dict[str, Any]]) -> str:
 
 def _format(value: Any) -> str:
     return f"{value:.0f}" if isinstance(value, float) and value > 10 else f"{value}"
+
+
+#: The six required questions from the Mini RAG Lab brief.
+LAB_SIX: tuple[dict[str, Any], ...] = (
+    {
+        "q": "How much can I spend on food each day?",
+        "expected": "1",
+        "must_include": ("65",),
+    },
+    {
+        "q": "Can I book first-class airfare?",
+        "expected": "3",
+        "must_include": ("economy",),
+        "must_exclude": ("vice president",),
+    },
+    {
+        "q": "My hotel costs $250. What do I need?",
+        "expected": "2",
+        "must_include": ("manager",),
+    },
+    {
+        "q": "Do I need a receipt for a $20 taxi?",
+        "expected": "5",
+        "must_include": ("receipt",),
+    },
+    {
+        "q": "Can I claim a limousine upgrade?",
+        "expected": "4",
+        "must_include": ("luxury",),
+    },
+    {
+        "q": "Does the company reimburse gym memberships?",
+        "expected": None,
+        "must_include": (),
+    },
+)
+
+
+def run_lab_six(
+    settings: Settings, out: Path | None = None
+) -> list[dict[str, Any]]:
+    """Run the six lab questions under ``--config lab`` and write the report JSON."""
+    pipeline = Pipeline(settings, config=ABLATIONS["lab"])
+    rows: list[dict[str, Any]] = []
+
+    for item in LAB_SIX:
+        response = pipeline.ask(item["q"])
+        payload = response.to_dict()
+        citation = payload.get("citation")
+        cited = None if citation is None else str(citation.get("section", "")).split(".", 1)[0]
+        retrieved = payload.get("retrieved_chunks") or []
+        distances = [float(c["distance"]) for c in retrieved]
+        expected = item["expected"]
+        refused = payload["answer"].strip() == REFUSAL
+
+        if expected is None:
+            ok = refused and citation is None
+            detail = f"refuse={refused} citation_null={citation is None}"
+        else:
+            top_ok = bool(retrieved) and str(retrieved[0]["section"]).startswith(f"{expected}.")
+            cite_ok = cited == expected
+            includes = all(
+                needle.lower() in payload["answer"].lower() for needle in item["must_include"]
+            )
+            excludes = not any(
+                bad.lower() in payload["answer"].lower()
+                for bad in item.get("must_exclude", ())
+            )
+            ok = cite_ok and includes and excludes and not refused
+            detail = f"cite_ok={cite_ok} top_ok={top_ok} includes={includes} excludes={excludes}"
+
+        rows.append(
+            {
+                "q": item["q"],
+                "expected": expected,
+                "pass": ok,
+                "detail": detail,
+                "answer": payload["answer"],
+                "citation": citation,
+                "retrieved_chunks": retrieved,
+                "sorted_asc": distances == sorted(distances),
+                "n_chunks": len(retrieved),
+            }
+        )
+        print(f"{'PASS' if ok else 'FAIL'}  {item['q']}")
+
+    destination = out or (REPORTS / "lab-six-questions.json")
+    REPORTS.mkdir(parents=True, exist_ok=True)
+    destination.write_text(json.dumps(rows, indent=2), encoding="utf-8")
+    print(f"wrote {destination}")
+    return rows

@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from pathlib import Path
 
 from ragpolicy.config import Settings
 from ragpolicy.pipeline import ABLATIONS, Pipeline, RetrievalConfig
@@ -14,7 +15,12 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="rag", description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
 
-    sub.add_parser("index", help="embed the policy and write it to the vector store")
+    index = sub.add_parser("index", help="embed the policy and write it to the vector store")
+    index.add_argument(
+        "--lab",
+        action="store_true",
+        help="lab contract: index exactly six bare section chunks (does not replace full)",
+    )
 
     ask = sub.add_parser("ask", help="answer one question")
     ask.add_argument("question")
@@ -29,12 +35,25 @@ def main(argv: list[str] | None = None) -> int:
     calibrate = sub.add_parser("calibrate", help="fit abstention thresholds on the dev split")
     calibrate.add_argument("--config", choices=sorted(ABLATIONS), default="full")
 
+    lab_six = sub.add_parser(
+        "lab-six",
+        help="run the six Mini RAG Lab questions under --config lab and write the report",
+    )
+    lab_six.add_argument(
+        "--out",
+        type=Path,
+        default=None,
+        help="output JSON path (default: reports/lab-six-questions.json)",
+    )
+
     args = parser.parse_args(argv)
     settings = Settings.from_env()
 
     if args.command == "index":
-        count = Pipeline(settings).index()
-        print(f"indexed {count} chunks from {settings.policy_path.name}")
+        config = ABLATIONS["lab"] if args.lab else RetrievalConfig()
+        count = Pipeline(settings, config=config).index()
+        mode = "lab (6 bare sections)" if args.lab else "full"
+        print(f"indexed {count} chunks ({mode}) from {settings.policy_path.name}")
         return 0
 
     if args.command == "ask":
@@ -46,7 +65,7 @@ def main(argv: list[str] | None = None) -> int:
             _print_human(response)
         return 0
 
-    from ragpolicy.evaluate import run_ablation, run_calibration, run_suite
+    from ragpolicy.evaluate import run_ablation, run_calibration, run_lab_six, run_suite
 
     if args.command == "eval":
         if args.ablate:
@@ -57,6 +76,10 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "calibrate":
         run_calibration(settings, _config_for(args.config))
+        return 0
+
+    if args.command == "lab-six":
+        run_lab_six(settings, out=args.out)
         return 0
 
     return 1

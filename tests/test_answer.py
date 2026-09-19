@@ -7,6 +7,7 @@ behaviour is the eval harness's job, not this file's.
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 
 import pytest
 
@@ -16,6 +17,7 @@ from ragpolicy.answer import (
     Evidence,
     Thresholds,
     build_prompt,
+    locate_quote,
     verify_spans,
 )
 from ragpolicy.config import REPO_ROOT
@@ -38,7 +40,11 @@ class StubClient:
     #: which every fixture below retrieves. A quote absent from the evidence is refused.
     DEFAULT_RULE = "Alcohol is not reimbursable."
 
-    def __init__(self, payload: dict[str, object], entailment: float = 0.99) -> None:
+    def __init__(
+        self,
+        payload: dict[str, object],
+        entailment: float | Callable[[str], float] = 0.99,
+    ) -> None:
         self.payload = payload
         if payload and "governing_rule" not in payload:
             self.payload = {**payload, "governing_rule": self.DEFAULT_RULE}
@@ -50,6 +56,8 @@ class StubClient:
         return json.dumps(self.payload)
 
     def yes_probability(self, prompt: str, **kwargs: object) -> float:
+        if callable(self.entailment):
+            return self.entailment(prompt)
         return self.entailment
 
 
@@ -308,24 +316,150 @@ def test_a_quote_absent_from_the_evidence_is_refused() -> None:
     assert response.trace["abstained_at"] == "quote"
 
 
-def test_a_quote_spanning_two_sentences_matches_across_the_newline() -> None:
+def test_locate_quote_matches_across_newline_whitespace() -> None:
     """The policy separates sentences with newlines; models join them with a space."""
+    quote = (
+        "Employees must purchase economy airfare. Business-class airfare "
+        "requires written approval from a vice president."
+    )
+    found = locate_quote(quote, [scored("expense-policy:v2.0:section-3", 0.9)])
+    assert found is not None
+    hit, start, end = found
+    assert hit.chunk.chunk_id == "expense-policy:v2.0:section-3"
+    assert RAW[start:end] == BY_ID["expense-policy:v2.0:section-3"].text
+
+
+def test_a_multi_sentence_quote_narrows_to_the_supporting_sentence() -> None:
+    """Joined airfare rules are OK only when one sentence alone entails the answer."""
+    both = (
+        "Employees must purchase economy airfare. Business-class airfare "
+        "requires written approval from a vice president."
+    )
+
+    def score(prompt: str) -> float:
+        # Per-sentence prompts contain one rule; the economy sentence should win.
+        if "must purchase economy" in prompt and "Business-class" not in prompt:
+            return 0.99
+        return 0.01
+
     client = StubClient(
         {
-            "answer": "Economy only, unless a VP approves in writing.",
+            "answer": "You are allowed to buy economy airfare.",
             "section": "3",
-            "governing_rule": (
-                "Employees must purchase economy airfare. Business-class airfare "
-                "requires written approval from a vice president."
+            "governing_rule": both,
+        },
+        entailment=score,
+    )
+    answerer = make_answerer(client, tau=0.1, delta=0.0, entailment=0.5)
+    response = answerer.answer("what class?", [scored("expense-policy:v2.0:section-3", 0.9)])
+
+    assert response.answer == "You are allowed to buy economy airfare."
+    assert response.trace["governing_rule"] == "Employees must purchase economy airfare."
+    assert response.citation is not None
+    assert response.citation["section"] == "3. Airfare"
+
+
+def test_first_class_cannot_borrow_the_business_class_approval_rule() -> None:
+    """Regression: first-class is not business-class; neither airfare sentence supports it."""
+    both = (
+        "Employees must purchase economy airfare. Business-class airfare "
+        "requires written approval from a vice president."
+    )
+
+    def score(prompt: str) -> float:
+        return 0.01
+
+    client = StubClient(
+        {
+            "answer": (
+                "You cannot book first-class airfare without written approval "
+                "from a vice president."
             ),
+            "section": "3",
+            "governing_rule": both,
+        },
+        entailment=score,
+    )
+    answerer = make_answerer(client, tau=0.1, delta=0.0, entailment=0.5)
+    response = answerer.answer(
+        "Can I book first-class airfare?",
+        [scored("expense-policy:v2.0:section-3", 0.9)],
+    )
+
+    assert response.answer == REFUSAL
+    assert response.citation is None
+    # Peer-rule guard fires before entailment when the quoted span names business-class.
+    assert response.trace["abstained_at"] in {"verification", "peer_rule"}
+
+
+def test_first_class_plus_business_rule_is_refused_even_if_entailment_is_high() -> None:
+    """Live failure mode: the model quotes business-class and a weak entailment says yes."""
+    from ragpolicy.answer import peer_rule_mismatch
+
+    rule = "Business-class airfare requires written approval from a vice president."
+    answer = (
+        "You cannot book first-class airfare without written approval from a vice president."
+    )
+    assert peer_rule_mismatch("Can I book first-class airfare?", rule, answer) is True
+
+    client = StubClient(
+        {"answer": answer, "section": "3", "governing_rule": rule},
+        entailment=0.99,
+    )
+    answerer = make_answerer(client, tau=0.1, delta=0.0, entailment=0.5)
+    response = answerer.answer(
+        "Can I book first-class airfare?",
+        [scored("expense-policy:v2.0:section-3", 0.9)],
+    )
+
+    assert response.answer == REFUSAL
+    assert response.citation is None
+    assert response.trace["abstained_at"] == "peer_rule"
+
+
+def test_sibling_sentence_recovery_when_model_quotes_the_limit_not_the_approval() -> None:
+    """Hotels section has two sentences; quoting the cap must not kill a manager answer."""
+    client = StubClient(
+        {
+            "answer": "You need manager approval before booking a $250 hotel.",
+            "section": "2",
+            "governing_rule": "Hotels are reimbursable up to $225 per night.",
+        },
+        entailment=lambda prompt: (
+            0.99 if "manager must approve" in prompt.lower() else 0.01
+        ),
+    )
+    answerer = make_answerer(client, tau=0.1, delta=0.0, entailment=0.5)
+    response = answerer.answer(
+        "My hotel costs $250. What do I need?",
+        [scored("expense-policy:v2.0:section-2", 0.9)],
+    )
+
+    assert "manager" in response.answer.lower()
+    assert response.citation is not None
+    assert response.citation["section"] == "2. Hotels"
+    assert "manager must approve" in response.trace["governing_rule"].lower()
+    assert response.trace["abstained_at"] is None
+
+
+def test_the_economy_sentence_alone_grounds_a_first_class_answer() -> None:
+    client = StubClient(
+        {
+            "answer": "No. Employees must purchase economy airfare.",
+            "section": "3",
+            "governing_rule": "Employees must purchase economy airfare.",
         }
     )
     answerer = make_answerer(client, tau=0.1, delta=0.0)
-    response = answerer.answer("what class?", [scored("expense-policy:v2.0:section-3", 0.9)])
+    response = answerer.answer(
+        "Can I book first-class airfare?",
+        [scored("expense-policy:v2.0:section-3", 0.9)],
+    )
 
-    assert response.answer == "Economy only, unless a VP approves in writing."
-    span = response.trace["spans"][0]
-    assert RAW[span["start"] : span["end"]] == BY_ID["expense-policy:v2.0:section-3"].text
+    assert response.answer == "No. Employees must purchase economy airfare."
+    assert response.citation is not None
+    assert response.citation["section"] == "3. Airfare"
+    assert response.trace["governing_rule"] == "Employees must purchase economy airfare."
 
 
 def test_an_empty_quote_is_refused() -> None:

@@ -1,0 +1,166 @@
+[
+  {
+    "q": "How much can I spend on food each day?",
+    "expected": "1",
+    "pass": true,
+    "detail": "cite_ok=True top_ok=True includes=True excludes=True",
+    "answer": "You can spend up to $65 per day on food while traveling overnight.",
+    "citation": {
+      "document": "Employee Expense Policy",
+      "version": "2.0",
+      "section": "1. Meals"
+    },
+    "retrieved_chunks": [
+      {
+        "section": "1. Meals",
+        "distance": 0.3536386489868164
+      },
+      {
+        "section": "5. Receipts",
+        "distance": 0.5210939049720764
+      },
+      {
+        "section": "2. Hotels",
+        "distance": 0.5221138596534729
+      }
+    ],
+    "sorted_asc": true,
+    "n_chunks": 3
+  },
+  {
+    "q": "Can I book first-class airfare?",
+    "expected": "3",
+    "pass": true,
+    "detail": "cite_ok=True top_ok=True includes=True excludes=True",
+    "answer": "Economy airfare is required. First-class airfare is not allowed.",
+    "citation": {
+      "document": "Employee Expense Policy",
+      "version": "2.0",
+      "section": "3. Airfare"
+    },
+    "retrieved_chunks": [
+      {
+        "section": "3. Airfare",
+        "distance": 0.3660097122192383
+      },
+      {
+        "section": "4. Ground Transportation",
+        "distance": 0.5431830286979675
+      },
+      {
+        "section": "2. Hotels",
+        "distance": 0.54952472448349
+      }
+    ],
+    "sorted_asc": true,
+    "n_chunks": 3
+  },
+  {
+    "q": "My hotel costs $250. What do I need?",
+    "expected": "2",
+    "pass": true,
+    "detail": "cite_ok=True top_ok=True includes=True excludes=True",
+    "answer": "A manager must approve higher rates before booking.",
+    "citation": {
+      "document": "Employee Expense Policy",
+      "version": "2.0",
+      "section": "2. Hotels"
+    },
+    "retrieved_chunks": [
+      {
+        "section": "2. Hotels",
+        "distance": 0.330345094203949
+      },
+      {
+        "section": "5. Receipts",
+        "distance": 0.35719990730285645
+      },
+      {
+        "section": "1. Meals",
+        "distance": 0.4775868058204651
+      }
+    ],
+    "sorted_asc": true,
+    "n_chunks": 3
+  },
+  {
+    "q": "Do I need a receipt for a $20 taxi?",
+    "expected": "5",
+    "pass": true,
+    "detail": "cite_ok=True top_ok=True includes=True excludes=True",
+    "answer": "No, you do not need a receipt for a $20 taxi.",
+    "citation": {
+      "document": "Employee Expense Policy",
+      "version": "2.0",
+      "section": "5. Receipts"
+    },
+    "retrieved_chunks": [
+      {
+        "section": "5. Receipts",
+        "distance": 0.3747215270996094
+      },
+      {
+        "section": "4. Ground Transportation",
+        "distance": 0.43549245595932007
+      },
+      {
+        "section": "6. Submission Deadline",
+        "distance": 0.5304844379425049
+      }
+    ],
+    "sorted_asc": true,
+    "n_chunks": 3
+  },
+  {
+    "q": "Can I claim a limousine upgrade?",
+    "expected": "4",
+    "pass": true,
+    "detail": "cite_ok=True top_ok=True includes=True excludes=True",
+    "answer": "Luxury vehicle upgrades are not reimbursable.",
+    "citation": {
+      "document": "Employee Expense Policy",
+      "version": "2.0",
+      "section": "4. Ground Transportation"
+    },
+    "retrieved_chunks": [
+      {
+        "section": "4. Ground Transportation",
+        "distance": 0.31200695037841797
+      },
+      {
+        "section": "1. Meals",
+        "distance": 0.537621021270752
+      },
+      {
+        "section": "2. Hotels",
+        "distance": 0.560245156288147
+      }
+    ],
+    "sorted_asc": true,
+    "n_chunks": 3
+  },
+  {
+    "q": "Does the company reimburse gym memberships?",
+    "expected": null,
+    "pass": true,
+    "detail": "refuse=True citation_null=True",
+    "answer": "The provided policy does not answer this question.",
+    "citation": null,
+    "retrieved_chunks": [
+      {
+        "section": "4. Ground Transportation",
+        "distance": 0.5393579006195068
+      },
+      {
+        "section": "1. Meals",
+        "distance": 0.5910848379135132
+      },
+      {
+        "section": "2. Hotels",
+        "distance": 0.6383618712425232
+      }
+    ],
+    "sorted_asc": true,
+    "n_chunks": 3
+  }
+]

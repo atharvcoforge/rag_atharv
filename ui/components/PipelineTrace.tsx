@@ -41,7 +41,7 @@ export default function PipelineTrace({
     return () => clearTimeout(t);
   }, [order, reduce, runId]);
 
-  const sum = stages.reduce((a, s) => a + s.ms, 0) || 1;
+  const sum = stages.reduce((a, s) => a + s.ms, 0);
   const rows = [...candidates].sort((a, b) =>
     order === "distance" ? a.distance - b.distance : b.score - a.score,
   );
@@ -61,7 +61,11 @@ export default function PipelineTrace({
           </motion.span>
         )}
         <span className="num ml-auto text-[11px] text-ink-dim">
-          {totalMs !== null ? `${totalMs.toFixed(1)} ms` : `${sum.toFixed(1)} ms`}
+          {totalMs !== null
+            ? `${totalMs.toFixed(1)} ms`
+            : stages.length
+              ? `${sum.toFixed(1)} ms`
+              : "idle"}
         </span>
       </header>
 
