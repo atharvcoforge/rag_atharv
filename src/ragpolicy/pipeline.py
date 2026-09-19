@@ -8,6 +8,7 @@ decide which stages have earned their latency.
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -16,6 +17,7 @@ from ragpolicy.answer import Answerer, Response, Thresholds
 from ragpolicy.config import Settings
 from ragpolicy.ingest import Chunk, build_corpus, contextual_text
 from ragpolicy.models import OllamaClient
+from ragpolicy.response_cache import AnswerCache
 from ragpolicy.retrieve import (
     BM25,
     RERANK_SYSTEM,
@@ -75,6 +77,15 @@ class Stage:
     detail: dict[str, Any] = field(default_factory=dict)
 
 
+StageListener = Callable[[Stage], None]
+#: ``(event name, payload)`` — the SSE endpoint's two event types, ``stage`` and ``status``.
+EventListener = Callable[[str, dict[str, Any]], None]
+
+
+def _silent(name: str, data: dict[str, Any]) -> None:
+    """Default listener: the CLI and the eval harness do not watch progress."""
+
+
 class Pipeline:
     def __init__(
         self,
@@ -94,6 +105,8 @@ class Pipeline:
             rerank_model=settings.rerank_model,
             gen_model=settings.gen_model,
             cache_path=settings.embed_cache_path,
+            rerank_base_url=settings.rerank_ollama_url or settings.ollama_base_url,
+            keep_alive=settings.keep_alive,
         )
         self.store = (
             store if store is not None else open_store(settings.postgres_dsn, settings.vector_store)
@@ -106,6 +119,9 @@ class Pipeline:
             corpus=self.corpus,
             thresholds=thresholds,
             verify=self.config.verify,
+        )
+        self._answers: AnswerCache | None = (
+            AnswerCache(settings.answer_cache_path) if settings.answer_cache else None
         )
 
     @property
@@ -123,6 +139,9 @@ class Pipeline:
         vectors = self.client.embed_documents(texts)
         self.store.create(dim=int(vectors.shape[1]))
         self.store.upsert(self.corpus, vectors)
+        if self._answers is not None:
+            # Old answers cite spans into the previous policy bytes.
+            self._answers.clear()
         return len(self.corpus)
 
     def ensure_lab_store(self) -> NumpyStore:
@@ -146,11 +165,21 @@ class Pipeline:
 
     # -- querying ------------------------------------------------------------------
 
-    def retrieve(self, question: str) -> tuple[list[ScoredHit], list[Stage]]:
+    def retrieve(
+        self, question: str, on_stage: StageListener | None = None
+    ) -> tuple[list[ScoredHit], list[Stage]]:
         if self.config.lab:
-            return self._retrieve_lab(question)
+            return self._retrieve_lab(question, on_stage)
 
         stages: list[Stage] = []
+
+        def record(name: str, started: float, **detail: Any) -> None:
+            """Close a stage and publish it now: the stream should not wait for the answer."""
+            stage = Stage(name, (time.perf_counter() - started) * 1000, detail)
+            stages.append(stage)
+            if on_stage is not None:
+                on_stage(stage)
+
         propositions = {c.chunk_id: c for c in self.corpus if c.kind == "proposition"}
         rankings: list[list[str]] = []
         distances: dict[str, float] = {}
@@ -166,17 +195,13 @@ class Pipeline:
             for hit in dense_hits:
                 distances[hit.chunk.chunk_id] = hit.distance
             rankings.append([hit.chunk.chunk_id for hit in dense_hits])
-            stages.append(
-                Stage("dense", (time.perf_counter() - started) * 1000, {"hits": len(dense_hits)})
-            )
+            record("dense", started, hits=len(dense_hits))
 
         if self.config.bm25:
             started = time.perf_counter()
             lexical = self.bm25.search(question, limit=self.config.candidates)
             rankings.append([chunk_id for chunk_id, _ in lexical])
-            stages.append(
-                Stage("bm25", (time.perf_counter() - started) * 1000, {"hits": len(lexical)})
-            )
+            record("bm25", started, hits=len(lexical))
 
         started = time.perf_counter()
         fused = reciprocal_rank_fusion(rankings)
@@ -185,17 +210,13 @@ class Pipeline:
             for cid, _ in fused
             if cid in propositions
         ][: self.config.rerank_candidates]
-        stages.append(
-            Stage("fuse", (time.perf_counter() - started) * 1000, {"candidates": len(candidates)})
-        )
+        record("fuse", started, candidates=len(candidates))
 
         scored: list[ScoredHit]
         if self.config.rerank:
             started = time.perf_counter()
             scored = rerank(question, candidates, scorer=self._relevance)
-            stages.append(
-                Stage("rerank", (time.perf_counter() - started) * 1000, {"scored": len(scored)})
-            )
+            record("rerank", started, scored=len(scored))
         else:
             # Without a reranker, fused rank order is the score. Normalised so the
             # abstention gate sees a comparable 0-1 scale either way.
@@ -223,12 +244,12 @@ class Pipeline:
             for section in sections
             if section.chunk_id in best
         ][: self.config.final_sections]
-        stages.append(
-            Stage("expand", (time.perf_counter() - started) * 1000, {"sections": len(expanded)})
-        )
+        record("expand", started, sections=len(expanded))
         return expanded, stages
 
-    def _retrieve_lab(self, question: str) -> tuple[list[ScoredHit], list[Stage]]:
+    def _retrieve_lab(
+        self, question: str, on_stage: StageListener | None = None
+    ) -> tuple[list[ScoredHit], list[Stage]]:
         """Dense cosine over the six bare section vectors, ascending distance, LIMIT 3."""
         started = time.perf_counter()
         store = self.ensure_lab_store()
@@ -242,17 +263,46 @@ class Pipeline:
             )
             for hit in hits
         ]
-        stages = [
-            Stage("dense", (time.perf_counter() - started) * 1000, {"hits": len(scored)})
-        ]
-        return scored, stages
+        stage = Stage("dense", (time.perf_counter() - started) * 1000, {"hits": len(scored)})
+        if on_stage is not None:
+            on_stage(stage)
+        return scored, [stage]
 
-    def ask(self, question: str) -> Response:
+    def ask(self, question: str, on_event: EventListener | None = None) -> Response:
+        """Answer one question, reporting progress to ``on_event`` as each step lands.
+
+        The listener is how the SSE endpoint shows retrieval finishing in milliseconds
+        while generation and verification are still running. An exact cache hit skips
+        the models entirely and announces ``cached`` instead.
+        """
         started = time.perf_counter()
-        hits, stages = self.retrieve(question)
-        response = self.answerer.answer(question, hits)
+        emit = on_event if on_event is not None else _silent
+
+        if self._answers is not None:
+            cached = self._answers.get(question, self.config)
+            if cached is not None:
+                emit("status", {"phase": "cached"})
+                response = Response(
+                    answer=cached["answer"],
+                    citation=cached["citation"],
+                    retrieved_chunks=cached["retrieved_chunks"],
+                    trace=dict(cached.get("trace") or {}),
+                )
+                response.trace["cache_hit"] = True
+                response.trace["total_ms"] = (time.perf_counter() - started) * 1000
+                return response
+
+        hits, stages = self.retrieve(
+            question, on_stage=lambda stage: emit("stage", {"name": stage.name, "ms": stage.ms})
+        )
+        response = self.answerer.answer(
+            question, hits, on_phase=lambda phase: emit("status", {"phase": phase})
+        )
         response.trace["stages"] = [{"name": s.name, "ms": s.ms, **s.detail} for s in stages]
         response.trace["total_ms"] = (time.perf_counter() - started) * 1000
+        response.trace["cache_hit"] = False
+        if self._answers is not None:
+            self._answers.put(question, self.config, response.to_dict())
         return response
 
     # -- model helpers -------------------------------------------------------------

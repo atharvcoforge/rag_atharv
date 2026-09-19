@@ -14,7 +14,7 @@ import json
 import statistics
 import time
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -27,6 +27,12 @@ from ragpolicy.pipeline import ABLATIONS, Pipeline, RetrievalConfig
 GOLDEN_PATH = REPO_ROOT / "eval" / "golden.yaml"
 REPORTS = REPO_ROOT / "reports"
 THRESHOLDS_PATH = REPO_ROOT / "config" / "thresholds.json"
+
+
+def _cold(settings: Settings) -> Settings:
+    """Eval timings must not read a warm answer cache from a previous UI session."""
+    return replace(settings, answer_cache=False)
+
 
 #: Buckets where the correct behaviour is to refuse.
 REFUSAL_BUCKETS = frozenset({"unanswerable", "out_of_domain", "adversarial"})
@@ -180,7 +186,7 @@ def run_suite(
     if limit:
         cases = cases[:limit]
 
-    pipeline = Pipeline(settings, config=config, thresholds=thresholds or _load_thresholds())
+    pipeline = Pipeline(_cold(settings), config=config, thresholds=thresholds or _load_thresholds())
     results = []
     started = time.perf_counter()
     for index, case in enumerate(cases, start=1):
@@ -262,7 +268,9 @@ def run_calibration(settings: Settings, config: RetrievalConfig) -> Thresholds:
     holdout = [case for index, case in enumerate(cases) if index % 2 == 1]
 
     def observe(subset: Sequence[Case], label: str) -> list[tuple[bool, float, bool]]:
-        pipeline = Pipeline(settings, config=config, thresholds=Thresholds(tau=0.0, delta=0.0))
+        pipeline = Pipeline(
+            _cold(settings), config=config, thresholds=Thresholds(tau=0.0, delta=0.0)
+        )
         rows = []
         for index, case in enumerate(subset, start=1):
             response = pipeline.ask(case.question)
@@ -420,11 +428,9 @@ LAB_SIX: tuple[dict[str, Any], ...] = (
 )
 
 
-def run_lab_six(
-    settings: Settings, out: Path | None = None
-) -> list[dict[str, Any]]:
+def run_lab_six(settings: Settings, out: Path | None = None) -> list[dict[str, Any]]:
     """Run the six lab questions under ``--config lab`` and write the report JSON."""
-    pipeline = Pipeline(settings, config=ABLATIONS["lab"])
+    pipeline = Pipeline(_cold(settings), config=ABLATIONS["lab"])
     rows: list[dict[str, Any]] = []
 
     for item in LAB_SIX:
@@ -447,8 +453,7 @@ def run_lab_six(
                 needle.lower() in payload["answer"].lower() for needle in item["must_include"]
             )
             excludes = not any(
-                bad.lower() in payload["answer"].lower()
-                for bad in item.get("must_exclude", ())
+                bad.lower() in payload["answer"].lower() for bad in item.get("must_exclude", ())
             )
             ok = cite_ok and includes and excludes and not refused
             detail = f"cite_ok={cite_ok} top_ok={top_ok} includes={includes} excludes={excludes}"

@@ -193,6 +193,54 @@ def test_yes_probability_requests_a_single_deterministic_token(tmp_path: Path) -
     assert body["think"] is False
 
 
+def test_reranking_goes_to_the_rerank_endpoint_and_model(tmp_path: Path) -> None:
+    """A dedicated scorer only helps if it is not queued behind the generator."""
+    client, seen = make_client(
+        logprob_handler([(" Yes", math.log(0.99))]),
+        tmp_path,
+        rerank_base_url="http://rerank.test",
+    )
+    client.yes_probability("does this excerpt govern the question?")
+
+    assert seen[0]["url"].startswith("http://rerank.test")
+    assert seen[0]["body"]["model"] == "rerank-model"
+
+
+def test_entailment_stays_on_the_generation_model(tmp_path: Path) -> None:
+    """Verification is the gate holding false answers down; it does not get the cheap model."""
+    client, seen = make_client(
+        logprob_handler([(" Yes", math.log(0.99))]),
+        tmp_path,
+        rerank_base_url="http://rerank.test",
+    )
+    client.yes_probability("is the statement supported?", role="entailment")
+
+    assert seen[0]["url"].startswith("http://ollama.test")
+    assert seen[0]["body"]["model"] == "gen-model"
+
+
+def test_requests_keep_the_models_resident(tmp_path: Path) -> None:
+    client, seen = make_client(logprob_handler([(" Yes", math.log(0.99))]), tmp_path)
+    client.yes_probability("q")
+
+    assert seen[0]["body"]["keep_alive"] == "30m"
+
+
+def test_warming_loads_both_the_reranker_and_the_generator(tmp_path: Path) -> None:
+    client, seen = make_client(
+        logprob_handler([(" Yes", math.log(0.99))]),
+        tmp_path,
+        rerank_base_url="http://rerank.test",
+    )
+    timings = client.warm()
+
+    assert set(timings) == {"rerank_ms", "gen_ms"}
+    assert [entry["url"].split("/api")[0] for entry in seen] == [
+        "http://rerank.test",
+        "http://ollama.test",
+    ]
+
+
 def test_yes_probability_passes_the_system_prompt_through(tmp_path: Path) -> None:
     client, seen = make_client(logprob_handler([(" Yes", math.log(0.99))]), tmp_path)
     client.yes_probability("q", system="you are a judge")

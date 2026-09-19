@@ -1,4 +1,4 @@
-"""Command line entry point: ``rag index``, ``rag ask``, ``rag eval``, ``rag calibrate``."""
+"""Command line entry point: ``rag index``, ``ask``, ``eval``, ``calibrate``, ``rerank-probe``."""
 
 from __future__ import annotations
 
@@ -8,7 +8,9 @@ import sys
 from pathlib import Path
 
 from ragpolicy.config import Settings
+from ragpolicy.models import OllamaClient
 from ragpolicy.pipeline import ABLATIONS, Pipeline, RetrievalConfig
+from ragpolicy.rerank_probe import BASELINE_MS, format_result, run_probe
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -46,6 +48,18 @@ def main(argv: list[str] | None = None) -> int:
         help="output JSON path (default: reports/lab-six-questions.json)",
     )
 
+    probe = sub.add_parser(
+        "rerank-probe",
+        help="check a candidate reranker separates governing rules from near misses",
+    )
+    probe.add_argument("--model", default=None, help="defaults to RERANK_MODEL")
+    probe.add_argument(
+        "--baseline-ms",
+        type=float,
+        default=BASELINE_MS,
+        help="per-call cost to beat (default: what qwen3:8b costs)",
+    )
+
     args = parser.parse_args(argv)
     settings = Settings.from_env()
 
@@ -64,6 +78,9 @@ def main(argv: list[str] | None = None) -> int:
         else:
             _print_human(response)
         return 0
+
+    if args.command == "rerank-probe":
+        return _rerank_probe(settings, args.model, args.baseline_ms)
 
     from ragpolicy.evaluate import run_ablation, run_calibration, run_lab_six, run_suite
 
@@ -87,6 +104,26 @@ def main(argv: list[str] | None = None) -> int:
 
 def _config_for(name: str) -> RetrievalConfig:
     return ABLATIONS[name]
+
+
+def _rerank_probe(settings: Settings, model: str | None, baseline_ms: float) -> int:
+    """Non-zero exit on failure, so the default reranker cannot be changed on a hunch."""
+    client = OllamaClient(
+        base_url=settings.ollama_base_url,
+        embed_model=settings.embed_model,
+        rerank_model=settings.rerank_model,
+        gen_model=settings.gen_model,
+        cache_path=settings.embed_cache_path,
+        rerank_base_url=settings.rerank_ollama_url or settings.ollama_base_url,
+        keep_alive=settings.keep_alive,
+    )
+    try:
+        result = run_probe(client, model or settings.rerank_model, baseline_ms=baseline_ms)
+    finally:
+        client.close()
+
+    print(format_result(result))
+    return 0 if result.passed else 1
 
 
 def _print_human(response: object) -> None:

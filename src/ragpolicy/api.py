@@ -1,9 +1,10 @@
 """HTTP layer over :class:`~ragpolicy.pipeline.Pipeline`.
 
 ``POST /api/ask`` returns the lab's response contract byte for byte; everything this
-system knows beyond that contract stays under ``trace``. The streaming endpoint replays
-the same payload as Server-Sent Events so the UI can render stages and tokens as they
-arrive.
+system knows beyond that contract stays under ``trace``. The streaming endpoint reports
+the same run live over Server-Sent Events: retrieval stages land in milliseconds, the
+generation and verification phases are announced as they start, and the answer itself
+arrives once the abstention gates have passed on it.
 
 The pipeline is built on first use, never at import time: constructing one opens a
 Postgres connection and loads the corpus, which neither the tests nor CI have.
@@ -12,8 +13,9 @@ Postgres connection and loads the corpus, which neither the tests nor CI have.
 from __future__ import annotations
 
 import json
-import re
 from collections.abc import Callable, Iterator
+from queue import Queue
+from threading import Thread
 from typing import Annotated, Any
 
 from fastapi import Depends, FastAPI, HTTPException
@@ -76,8 +78,8 @@ def ask(body: AskRequest, build: PipelineFor) -> dict[str, Any]:
 
 @app.get("/api/ask/stream")
 def ask_stream(question: str, build: PipelineFor, config: str = "full") -> StreamingResponse:
-    payload = build(_checked(config)).ask(question).to_dict()
-    return StreamingResponse(_events(payload), media_type="text/event-stream")
+    pipeline = build(_checked(config))
+    return StreamingResponse(_events(pipeline, question), media_type="text/event-stream")
 
 
 @app.get("/api/document")
@@ -108,6 +110,12 @@ def index(build: PipelineFor) -> dict[str, int]:
     return {"indexed": build("full").index()}
 
 
+@app.post("/api/warm")
+def warm(build: PipelineFor) -> dict[str, float]:
+    """Load both models on demand, so a deploy pays the cold start instead of a user."""
+    return build("full").client.warm()
+
+
 @app.get("/api/health")
 def health(build: PipelineFor) -> dict[str, Any]:
     pipeline = build("full")
@@ -119,6 +127,10 @@ def health(build: PipelineFor) -> dict[str, Any]:
             "embed": settings.embed_model,
             "rerank": settings.rerank_model,
             "gen": settings.gen_model,
+        },
+        "endpoints": {
+            "ollama": settings.ollama_base_url,
+            "rerank": settings.rerank_ollama_url or settings.ollama_base_url,
         },
         "chunks": len(pipeline.corpus),
     }
@@ -137,10 +149,38 @@ def _sse(event: str, data: Any) -> str:
     return f"event: {event}\ndata: {json.dumps(data)}\n\n"
 
 
-def _events(payload: dict[str, Any]) -> Iterator[str]:
-    """Stages first, then the answer a token at a time, then the whole response."""
-    for stage in payload["trace"].get("stages", []):
-        yield _sse("stage", {"name": stage["name"], "ms": stage["ms"]})
-    for token in re.findall(r"\S+\s*", payload["answer"]):
-        yield _sse("token", token)
-    yield _sse("done", payload)
+def _events(pipeline: Pipeline, question: str) -> Iterator[str]:
+    """Progress as it happens: each retrieval stage, then the answer phases, then the payload.
+
+    The pipeline runs on a worker thread and reports through a queue, which is what lets
+    a stage that finished in 5ms reach the browser while generation is still running.
+
+    ``done`` stays atomic on purpose. Generated text is only an answer once the quote and
+    entailment gates have accepted it, and showing a sentence that verification may still
+    refuse would be a worse experience than the wait it saves.
+    """
+    events: Queue[tuple[str, Any] | None] = Queue()
+    outcome: dict[str, Any] = {}
+
+    def run() -> None:
+        try:
+            outcome["done"] = pipeline.ask(
+                question, on_event=lambda name, data: events.put((name, data))
+            ).to_dict()
+        except Exception as error:  # a dead stream tells the UI nothing; an event does
+            outcome["error"] = {"message": str(error)}
+        finally:
+            events.put(None)
+
+    worker = Thread(target=run, daemon=True)
+    worker.start()
+
+    while (event := events.get()) is not None:
+        name, data = event
+        yield _sse(name, data)
+
+    worker.join()
+    if "error" in outcome:
+        yield _sse("error", outcome["error"])
+    else:
+        yield _sse("done", outcome["done"])

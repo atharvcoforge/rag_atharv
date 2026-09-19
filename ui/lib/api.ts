@@ -1,5 +1,5 @@
 import { MOCK_DOCUMENT, MOCK_EVALS, mockAsk } from "./mock";
-import type { AskResponse, EvalReport, PolicyDoc, Stage } from "./types";
+import type { AskResponse, EvalReport, Phase, PolicyDoc, Stage } from "./types";
 
 export const API_BASE =
   process.env.NEXT_PUBLIC_API_BASE ?? "http://localhost:8000";
@@ -51,6 +51,8 @@ export async function ask(question: string): Promise<Sourced<AskResponse>> {
 
 export type StreamHandlers = {
   onStage: (stage: Stage) => void;
+  onPhase: (phase: Phase) => void;
+  /** Only the offline fixture replay produces tokens; the live stream does not. */
   onToken: (token: string) => void;
   onDone: (result: AskResponse, offline: boolean) => void;
 };
@@ -75,6 +77,10 @@ function readToken(data: string): string {
 /**
  * Subscribe to the SSE stream. Falls back to POST /api/ask, and then to
  * fixtures, so the pane always resolves to a terminal state.
+ *
+ * The live stream reports progress, not prose: retrieval stages land in
+ * milliseconds and the generation and verification phases are announced as they
+ * start, but no answer text arrives until the gates have accepted it.
  * Returns a cancel function.
  */
 export function askStream(question: string, h: StreamHandlers): () => void {
@@ -107,8 +113,24 @@ export function askStream(question: string, h: StreamHandlers): () => void {
         /* ignore malformed stage frames */
       }
     });
+    es.addEventListener("status", (e) => {
+      try {
+        const { phase } = JSON.parse((e as MessageEvent<string>).data) as {
+          phase: Phase;
+        };
+        h.onPhase(phase);
+      } catch {
+        /* ignore malformed status frames */
+      }
+    });
     es.addEventListener("token", (e) => {
       h.onToken(readToken((e as MessageEvent<string>).data));
+    });
+    // Catches both a dropped connection and the server's own `error` event: either
+    // way the pane owes the user a terminal state, and POST /api/ask can still give one.
+    es.addEventListener("error", () => {
+      es?.close();
+      void fallback();
     });
     es.addEventListener("done", (e) => {
       settled = true;
@@ -119,10 +141,6 @@ export function askStream(question: string, h: StreamHandlers): () => void {
         void fallback();
       }
     });
-    es.onerror = () => {
-      es?.close();
-      void fallback();
-    };
   } catch {
     void fallback();
   }
@@ -146,6 +164,7 @@ async function replayMock(
     if (isCancelled()) return;
     h.onStage(stage);
   }
+  h.onPhase("generating");
   for (const word of result.answer.match(/\S+\s*/g) ?? []) {
     await sleep(22);
     if (isCancelled()) return;

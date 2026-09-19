@@ -79,8 +79,10 @@ def _settings() -> Settings:
         postgres_dsn="postgresql://unused",
         policy_path=REPO_ROOT / "policy.md",
         embed_cache_path=REPO_ROOT / ".cache" / "test-lab-embeddings.sqlite",
+        answer_cache_path=REPO_ROOT / ".cache" / "test-lab-answers.sqlite",
         cassette_dir=REPO_ROOT / "tests" / "cassettes",
         cassette_mode="off",
+        answer_cache=False,
     )
 
 

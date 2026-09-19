@@ -5,10 +5,12 @@ import { Quote } from "lucide-react";
 import AbstentionState from "./AbstentionState";
 import ConfidenceDial from "./ConfidenceDial";
 import { SPRING } from "@/lib/motion";
-import type { AskResponse } from "@/lib/types";
+import type { AskResponse, Phase } from "@/lib/types";
 
 type Props = {
   status: "idle" | "running" | "done";
+  /** What the backend is doing right now, while there is nothing to show yet. */
+  phase: Phase | null;
   /** Tokens received so far; the full answer once done. */
   text: string;
   result: AskResponse | null;
@@ -16,8 +18,15 @@ type Props = {
   onCitationClick: () => void;
 };
 
+const PHASE_LABEL: Record<Phase, string> = {
+  generating: "drafting an answer from the retrieved rules",
+  verifying: "checking the quote against the policy",
+  cached: "returning a previous answer for this question",
+};
+
 export default function AnswerPanel({
   status,
+  phase,
   text,
   result,
   offline,
@@ -60,6 +69,11 @@ export default function AnswerPanel({
       </header>
 
       <div className="px-5 py-6">
+        {status === "running" && phase && !text && (
+          <p className="num mb-3 text-[11px] text-ink-faint">
+            {PHASE_LABEL[phase]}
+          </p>
+        )}
         <p className="max-w-[58ch] text-[17px] leading-[1.6] text-ink">
           {text}
           {status === "running" && (

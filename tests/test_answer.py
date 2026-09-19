@@ -7,6 +7,7 @@ behaviour is the eval harness's job, not this file's.
 from __future__ import annotations
 
 import json
+import time
 from collections.abc import Callable
 
 import pytest
@@ -500,6 +501,35 @@ def test_trace_records_confidence_and_stage_timings() -> None:
 
     assert 0.0 <= trace["confidence"] <= 1.0
     assert trace["retrieval_score"] == 0.9
+
+
+def test_trace_splits_generation_from_verification_time() -> None:
+    """Stage timings cover retrieval, so the answer half needs its own two numbers."""
+
+    class Slow(StubClient):
+        def generate(self, prompt: str, **kwargs: object) -> str:
+            time.sleep(0.03)
+            return super().generate(prompt, **kwargs)
+
+        def yes_probability(self, prompt: str, **kwargs: object) -> float:
+            time.sleep(0.01)
+            return super().yes_probability(prompt, **kwargs)
+
+    answerer = make_answerer(Slow({"answer": "No.", "section": "1"}), tau=0.1, delta=0.0)
+    trace = answerer.answer("wine?", [scored("expense-policy:v2.0:section-1", 0.9)]).trace
+
+    assert trace["generate_ms"] >= 30
+    assert 10 <= trace["verify_ms"] < trace["generate_ms"]
+    assert trace["generate_ms"] + trace["verify_ms"] <= trace["elapsed_ms"]
+
+
+def test_trace_charges_no_answer_time_when_the_retrieval_gate_refuses() -> None:
+    answerer = make_answerer(StubClient({"answer": "x", "section": "1"}), tau=0.99)
+    trace = answerer.answer("q", [scored("expense-policy:v2.0:section-1", 0.9)]).trace
+
+    assert trace["abstained_at"] == "retrieval"
+    assert trace["generate_ms"] == 0.0
+    assert trace["verify_ms"] == 0.0
 
 
 @pytest.mark.parametrize("malformed", ["not json at all", "{}", '{"answer": ""}'])

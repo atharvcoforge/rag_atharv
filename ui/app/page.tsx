@@ -7,7 +7,7 @@ import PipelineTrace from "@/components/PipelineTrace";
 import PolicyDocument from "@/components/PolicyDocument";
 import { askStream, fetchDocument } from "@/lib/api";
 import { EXAMPLE_QUESTIONS } from "@/lib/mock";
-import type { AskResponse, PolicyDoc, Stage } from "@/lib/types";
+import type { AskResponse, Phase, PolicyDoc, Stage } from "@/lib/types";
 
 type Status = "idle" | "running" | "done";
 
@@ -17,6 +17,7 @@ export default function Home() {
 
   const [question, setQuestion] = useState("");
   const [status, setStatus] = useState<Status>("idle");
+  const [phase, setPhase] = useState<Phase | null>(null);
   const [text, setText] = useState("");
   const [result, setResult] = useState<AskResponse | null>(null);
   const [stages, setStages] = useState<Stage[]>([]);
@@ -46,6 +47,7 @@ export default function Home() {
     cancel.current?.();
     setQuestion(q);
     setStatus("running");
+    setPhase(null);
     setText("");
     setResult(null);
     setStages([]);
@@ -56,6 +58,7 @@ export default function Home() {
         setStages((prev) =>
           prev.some((p) => p.name === s.name) ? prev : [...prev, s],
         ),
+      onPhase: setPhase,
       onToken: (t) => setText((prev) => prev + t),
       onDone: (r, isOffline) => {
         setResult(r);
@@ -63,6 +66,7 @@ export default function Home() {
         setStages(r.trace.stages);
         setOffline(isOffline);
         setStatus("done");
+        setPhase(null);
         setActiveSpan(0);
         setRunId((n) => n + 1);
         setFlashKey((n) => n + 1);
@@ -103,6 +107,7 @@ export default function Home() {
 
           <AnswerPanel
             status={status}
+            phase={phase}
             text={text}
             result={result}
             offline={offline}

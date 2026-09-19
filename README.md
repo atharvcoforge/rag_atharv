@@ -27,6 +27,11 @@ question
     -> {answer, citation, retrieved_chunks, trace}
 ```
 
+`GET /api/ask/stream` reports that run live: each retrieval stage as it closes (first
+one at ~8ms), then `generating` and `verifying`, then the payload. No answer text is
+streamed before the gates have accepted it — a sentence verification may still refuse is
+worse than the wait it saves. Numbers in [`reports/latency.md`](reports/latency.md).
+
 Lab contract is the top-level JSON. Distances are numbers, at most three chunks,
 sorted ascending. Everything extra is under `trace`.
 
@@ -58,7 +63,28 @@ uv run rag index                 # full corpus (sections + propositions, context
 uv run rag ask "Can I expense wine with dinner?"
 uv run rag eval --ablate         # writes reports/ablation.json
 uv run uvicorn ragpolicy.api:app --reload --port 8000
+curl -X POST localhost:8000/api/warm   # load both models before the first user
 ```
+
+Identical questions (case/whitespace folded) are answered from `.cache/answers.sqlite`
+instead of re-running the 8B — expect milliseconds on a retry. Set `ANSWER_CACHE=off`
+for cold timing. Re-index clears the cache.
+
+### Swapping the reranker
+
+Six serial cross-encoder calls are about a second of every answer, so a smaller scorer
+is tempting. Three have already been rejected for scoring near misses as highly as the
+rule that governs the question. `rag rerank-probe` is the gate, and it exits non-zero
+when a candidate inverts a case, stays confident on a question the policy cannot
+answer, or is not actually faster:
+
+```bash
+uv run rag rerank-probe --model qwen3:1.7b
+```
+
+Only after it passes is `RERANK_MODEL` worth changing — and then only if the golden set
+holds. Point `RERANK_OLLAMA_URL` at a second Ollama process to keep the scorer and the
+generator resident at the same time.
 
 ### Lab contract path (assignment checklist)
 
@@ -106,9 +132,11 @@ CI on GitHub Actions is that same hermetic suite.
 | `src/ragpolicy/answer.py` | generation, quote location, two gates |
 | `src/ragpolicy/pipeline.py` | wiring and ablation flags |
 | `src/ragpolicy/evaluate.py` | golden set, metrics, calibration |
-| `src/ragpolicy/api.py` | FastAPI + SSE |
+| `src/ragpolicy/rerank_probe.py` | separation gate for candidate rerankers |
+| `src/ragpolicy/api.py` | FastAPI + live SSE |
 | `eval/golden.yaml` | 48 questions, six buckets |
 | `config/thresholds.json` | fitted `tau` |
 | `ui/` | Next.js split view |
 
-Design notes: [`docs/superpowers/specs/2026-09-18-grounded-rag-design.md`](docs/superpowers/specs/2026-09-18-grounded-rag-design.md).
+Design notes: [`docs/superpowers/specs/2026-09-18-grounded-rag-design.md`](docs/superpowers/specs/2026-09-18-grounded-rag-design.md),
+[`docs/superpowers/specs/2026-09-18-rag-latency-design.md`](docs/superpowers/specs/2026-09-18-rag-latency-design.md).

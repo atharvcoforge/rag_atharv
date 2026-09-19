@@ -19,7 +19,7 @@ from __future__ import annotations
 import json
 import re
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -160,7 +160,9 @@ def recover_supporting_sentence(
         for sentence, _ in split_sentences(hit.chunk.text, 0):
             score = float(
                 client.yes_probability(
-                    entailment_prompt(answer, sentence), system=ENTAILMENT_SYSTEM
+                    entailment_prompt(answer, sentence),
+                    system=ENTAILMENT_SYSTEM,
+                    role="entailment",
                 )
             )
             if score < threshold:
@@ -203,6 +205,10 @@ def entailment_prompt(statement: str, evidence: str) -> str:
     )
 
 
+def _no_phase(phase: str) -> None:
+    """Default phase listener: nothing is watching a CLI or eval run."""
+
+
 class Answerer:
     def __init__(
         self,
@@ -218,7 +224,13 @@ class Answerer:
         self.thresholds = thresholds or Thresholds()
         self.verify = verify
 
-    def answer(self, question: str, hits: Sequence[ScoredHit]) -> Response:
+    def answer(
+        self,
+        question: str,
+        hits: Sequence[ScoredHit],
+        on_phase: Callable[[str], None] | None = None,
+    ) -> Response:
+        phase = on_phase if on_phase is not None else _no_phase
         started = time.perf_counter()
         hits = list(hits)
         top_score = hits[0].score if hits else 0.0
@@ -230,6 +242,10 @@ class Answerer:
             "confidence": top_score,
             "retrieval_score": top_score,
             "margin": margin,
+            # Stage timings cover retrieval only, so the answer half of the budget used
+            # to be readable solely by subtracting them from the total. Split it here.
+            "generate_ms": 0.0,
+            "verify_ms": 0.0,
             "spans": [],
             "candidates": [
                 {
@@ -245,9 +261,12 @@ class Answerer:
         if not hits or top_score < self.thresholds.tau or margin < self.thresholds.delta:
             return self._refuse(trace, "retrieval", chunks, started)
 
+        phase("generating")
+        generating = time.perf_counter()
         raw_output = self.client.generate(
             build_prompt(question, hits), system=SYSTEM, schema=ANSWER_SCHEMA
         )
+        trace["generate_ms"] = (time.perf_counter() - generating) * 1000
         parsed = _parse(raw_output)
         if parsed is None:
             return self._refuse(trace, "generation", chunks, started)
@@ -281,12 +300,11 @@ class Answerer:
             # answer; refuse if none do.
             if not self.verify:
                 return self._refuse(trace, "quote", chunks, started)
+            phase("verifying")
             best_sentence = ""
             best_support = -1.0
             for sentence in sentences:
-                score = self.client.yes_probability(
-                    entailment_prompt(answer_text, sentence), system=ENTAILMENT_SYSTEM
-                )
+                score = self._entailment(trace, answer_text, sentence)
                 if score > best_support:
                     best_support, best_sentence = score, sentence
             support = best_support
@@ -311,14 +329,15 @@ class Answerer:
             return self._refuse(trace, "span", chunks, started)
 
         if self.verify and support is None:
-            support = self.client.yes_probability(
-                entailment_prompt(answer_text, evidence[0].quote), system=ENTAILMENT_SYSTEM
-            )
+            phase("verifying")
+            support = self._entailment(trace, answer_text, evidence[0].quote)
             trace["entailment"] = support
             if support < self.thresholds.entailment:
+                recovering = time.perf_counter()
                 recovered = recover_supporting_sentence(
                     answer_text, hits, self.client, self.thresholds.entailment
                 )
+                trace["verify_ms"] += (time.perf_counter() - recovering) * 1000
                 if recovered is None:
                     return self._refuse(trace, "verification", chunks, started)
                 cited, sentence, support = recovered
@@ -354,6 +373,23 @@ class Answerer:
             retrieved_chunks=chunks,
             trace=trace,
         )
+
+    def _entailment(self, trace: dict[str, Any], statement: str, evidence: str) -> float:
+        """Score support for a statement, charging the wait to ``verify_ms``.
+
+        The trace is passed in rather than kept on ``self``: one Answerer serves every
+        request, and the API now runs them off the request thread.
+        """
+        started = time.perf_counter()
+        score = float(
+            self.client.yes_probability(
+                entailment_prompt(statement, evidence),
+                system=ENTAILMENT_SYSTEM,
+                role="entailment",
+            )
+        )
+        trace["verify_ms"] += (time.perf_counter() - started) * 1000
+        return score
 
     def _refuse(
         self, trace: dict[str, Any], stage: str, chunks: list[dict[str, Any]], started: float

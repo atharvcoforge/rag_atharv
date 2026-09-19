@@ -15,6 +15,7 @@ import hashlib
 import json
 import math
 import sqlite3
+import time
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -75,15 +76,41 @@ class OllamaClient:
         cache_path: Path,
         timeout: float = 120.0,
         transport: httpx.BaseTransport | None = None,
+        rerank_base_url: str | None = None,
+        keep_alive: str = "30m",
     ) -> None:
         self.embed_model = embed_model
         self.rerank_model = rerank_model
         self.gen_model = gen_model
+        self.keep_alive = keep_alive
         self._http = httpx.Client(base_url=base_url, timeout=timeout, transport=transport)
+        # A second endpoint is the only way to keep a small reranker and an 8B generator
+        # both resident: one Ollama process serialises requests and evicts on model swap.
+        self._rerank_http = (
+            self._http
+            if rerank_base_url in (None, base_url)
+            else httpx.Client(base_url=str(rerank_base_url), timeout=timeout, transport=transport)
+        )
         self._cache = _EmbeddingCache(cache_path)
 
     def close(self) -> None:
+        if self._rerank_http is not self._http:
+            self._rerank_http.close()
         self._http.close()
+
+    def warm(self) -> dict[str, float]:
+        """Load both models now, so the first real question does not pay the cold start.
+
+        Called from ``POST /api/warm`` rather than at import: a deploy can absorb the
+        load, and nothing forces a model into memory just because a process started.
+        """
+        started = time.perf_counter()
+        self.yes_probability("warm")
+        rerank_ms = (time.perf_counter() - started) * 1000
+
+        started = time.perf_counter()
+        self.generate("warm", num_predict=1)
+        return {"rerank_ms": rerank_ms, "gen_ms": (time.perf_counter() - started) * 1000}
 
     # -- embeddings ----------------------------------------------------------------
 
@@ -109,7 +136,7 @@ class OllamaClient:
         return vector
 
     def _embed_uncached(self, texts: list[str]) -> Vector:
-        payload = {"model": self.embed_model, "input": texts}
+        payload = {"model": self.embed_model, "input": texts, "keep_alive": self.keep_alive}
         raw = self._post("/api/embed", payload)["embeddings"]
         if len({len(vector) for vector in raw}) != 1:
             raise ValueError("embedding dimension is inconsistent across the batch")
@@ -118,7 +145,12 @@ class OllamaClient:
     # -- scoring -------------------------------------------------------------------
 
     def yes_probability(
-        self, prompt: str, *, system: str | None = None, model: str | None = None
+        self,
+        prompt: str,
+        *,
+        system: str | None = None,
+        model: str | None = None,
+        role: str = "rerank",
     ) -> float:
         """P(yes) from the first generated token, renormalised over yes and no mass.
 
@@ -128,19 +160,27 @@ class OllamaClient:
 
         ``think`` must be off. With thinking enabled a Qwen3 model spends its first token
         on ``<think>`` and the yes/no distribution never appears.
+
+        ``role`` picks the endpoint and the default model. Reranking runs wherever the
+        dedicated scorer lives; entailment stays on the generation model, because the
+        verification gate is what holds the false-answer rate down and must not inherit
+        a cheaper model's judgement.
         """
+        entailment = role == "entailment"
         payload: dict[str, Any] = {
-            "model": model or self.rerank_model,
+            "model": model or (self.gen_model if entailment else self.rerank_model),
             "prompt": prompt,
             "stream": False,
             "logprobs": True,
             "top_logprobs": 20,
             "think": False,
+            "keep_alive": self.keep_alive,
             "options": {"num_predict": 1, "temperature": 0, "seed": 0},
         }
         if system is not None:
             payload["system"] = system
-        entries = self._post("/api/generate", payload).get("logprobs") or []
+        http = self._http if entailment else self._rerank_http
+        entries = self._post("/api/generate", payload, http).get("logprobs") or []
         if not entries:
             return 0.5
 
@@ -207,6 +247,7 @@ class OllamaClient:
             # Deterministic by construction: the eval numbers have to be reproducible.
             "options": {"temperature": 0, "top_p": 1, "seed": 0, "num_predict": num_predict},
             "think": False,
+            "keep_alive": self.keep_alive,
         }
         if system is not None:
             payload["system"] = system
@@ -214,8 +255,10 @@ class OllamaClient:
             payload["format"] = schema
         return payload
 
-    def _post(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
-        response = self._http.post(path, json=payload)
+    def _post(
+        self, path: str, payload: dict[str, Any], http: httpx.Client | None = None
+    ) -> dict[str, Any]:
+        response = (http or self._http).post(path, json=payload)
         response.raise_for_status()
         result: dict[str, Any] = response.json()
         if "error" in result:

@@ -14,6 +14,7 @@ from itertools import groupby
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pytest
 from fastapi.testclient import TestClient
 
@@ -21,6 +22,7 @@ from ragpolicy import api
 from ragpolicy.answer import REFUSAL, Answerer, Response, Thresholds
 from ragpolicy.config import REPO_ROOT, Settings
 from ragpolicy.ingest import build_corpus
+from ragpolicy.pipeline import ABLATIONS, Pipeline
 from ragpolicy.retrieve import ScoredHit
 from ragpolicy.store import NumpyStore
 
@@ -42,6 +44,9 @@ class StubClient:
 
     def yes_probability(self, prompt: str, **kwargs: object) -> float:
         return self.entailment
+
+    def warm(self) -> dict[str, float]:
+        return {"rerank_ms": 12.0, "gen_ms": 34.0}
 
 
 def scored(chunk_id: str, score: float, distance: float) -> ScoredHit:
@@ -65,16 +70,25 @@ def answered(payload: Mapping[str, object], hits: list[ScoredHit], tau: float = 
 class FakePipeline:
     """Stands in for Pipeline: same attributes, no connections, no models."""
 
-    def __init__(self, response: Response) -> None:
+    def __init__(self, response: Response, error: Exception | None = None) -> None:
         self.response = response
+        self.error = error
         self.raw = RAW
         self.corpus = CORPUS
         self.settings = Settings.from_env()
         self.store = NumpyStore()
+        self.client = StubClient({})
         self.asked: list[str] = []
 
-    def ask(self, question: str) -> Response:
+    def ask(self, question: str, on_event: Any = None) -> Response:
         self.asked.append(question)
+        if self.error is not None:
+            raise self.error
+        if on_event is not None:
+            for stage in STAGES:
+                on_event("stage", {"name": stage["name"], "ms": stage["ms"]})
+            for phase in ("generating", "verifying"):
+                on_event("status", {"phase": phase})
         return self.response
 
     def index(self) -> int:
@@ -180,12 +194,12 @@ def test_ask_requires_a_question(client: TestClient) -> None:
 # -- GET /api/ask/stream -----------------------------------------------------------
 
 
-def test_stream_emits_stages_then_tokens_then_done(client: TestClient) -> None:
+def test_stream_emits_stages_then_phases_then_done(client: TestClient) -> None:
     response = client.get("/api/ask/stream", params={"question": "meal cap?"})
 
     assert response.headers["content-type"].startswith("text/event-stream")
     names = [name for name, _ in events(response.text)]
-    assert [name for name, _ in groupby(names)] == ["stage", "token", "done"]
+    assert [name for name, _ in groupby(names)] == ["stage", "status", "done"]
     assert names.count("stage") == len(STAGES)
 
 
@@ -196,11 +210,124 @@ def test_stream_stages_carry_a_name_and_a_duration(client: TestClient) -> None:
     assert stages == [{"name": "dense", "ms": 6.0}, {"name": "rerank", "ms": 918.0}]
 
 
-def test_stream_tokens_reassemble_into_the_answer(client: TestClient) -> None:
+def test_stream_announces_the_generation_and_verification_phases(client: TestClient) -> None:
     body = client.get("/api/ask/stream", params={"question": "q"}).text
-    tokens = [data for name, data in events(body) if name == "token"]
+    statuses = [data for name, data in events(body) if name == "status"]
 
-    assert "".join(tokens) == ANSWERED["answer"]
+    assert statuses == [{"phase": "generating"}, {"phase": "verifying"}]
+
+
+def test_stream_withholds_the_answer_until_the_gates_have_run(client: TestClient) -> None:
+    """No token replay: text the verification gate may still refuse must not be shown."""
+    body = client.get("/api/ask/stream", params={"question": "q"}).text
+    before_done = [name for name, _ in events(body)][:-1]
+
+    assert "token" not in before_done
+    assert ANSWERED["answer"] not in body.split("event: done")[0]
+
+
+def test_pipeline_publishes_retrieval_stages_before_the_answer_phases(
+    tmp_path: Path,
+) -> None:
+    """The seam the stream depends on: real Pipeline, real Answerer, events in order."""
+    from dataclasses import replace
+
+    class EmbedAndGenerate(StubClient):
+        """One-hot section vectors so section 1 wins, plus a quote it really contains."""
+
+        def embed_documents(self, texts: list[str]) -> Any:
+            return np.eye(len(texts), 6, dtype=np.float32)
+
+        def embed_query(self, query: str) -> Any:
+            return np.eye(1, 6, dtype=np.float32)[0]
+
+    pipeline = Pipeline(
+        replace(
+            Settings.from_env(),
+            answer_cache=False,
+            answer_cache_path=tmp_path / "unused.sqlite",
+        ),
+        config=ABLATIONS["lab"],
+        client=EmbedAndGenerate(  # type: ignore[arg-type]
+            {
+                "answer": "No, alcohol is not reimbursable.",
+                "section": "1",
+                "governing_rule": "Alcohol is not reimbursable.",
+            }
+        ),
+        store=NumpyStore(),
+        thresholds=Thresholds(tau=0.1, delta=0.0),
+    )
+
+    seen: list[tuple[str, dict[str, Any]]] = []
+    response = pipeline.ask("can I expense wine?", on_event=lambda n, d: seen.append((n, d)))
+
+    assert response.citation is not None
+    assert [name for name, _ in seen] == ["stage", "status", "status"]
+    assert seen[0][1]["name"] == "dense"
+    assert [data["phase"] for _, data in seen[1:]] == ["generating", "verifying"]
+
+
+def test_identical_questions_are_served_from_the_answer_cache(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A retry must not re-pay the 8B — that is the UI complaint this cache answers."""
+    from dataclasses import replace
+
+    class Counting(StubClient):
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            super().__init__(*args, **kwargs)  # type: ignore[arg-type]
+            self.generations = 0
+
+        def embed_documents(self, texts: list[str]) -> Any:
+            return np.eye(len(texts), 6, dtype=np.float32)
+
+        def embed_query(self, query: str) -> Any:
+            return np.eye(1, 6, dtype=np.float32)[0]
+
+        def generate(self, prompt: str, **kwargs: object) -> str:
+            self.generations += 1
+            return super().generate(prompt, **kwargs)
+
+    client = Counting(
+        {
+            "answer": "No, alcohol is not reimbursable.",
+            "section": "1",
+            "governing_rule": "Alcohol is not reimbursable.",
+        }
+    )
+    settings = replace(
+        Settings.from_env(),
+        answer_cache=True,
+        answer_cache_path=tmp_path / "answers.sqlite",
+    )
+    pipeline = Pipeline(
+        settings,
+        config=ABLATIONS["lab"],
+        client=client,  # type: ignore[arg-type]
+        store=NumpyStore(),
+        thresholds=Thresholds(tau=0.1, delta=0.0),
+    )
+
+    first_events: list[tuple[str, dict[str, Any]]] = []
+    first = pipeline.ask("can I expense wine?", on_event=lambda n, d: first_events.append((n, d)))
+    second_events: list[tuple[str, dict[str, Any]]] = []
+    second = pipeline.ask("Can I expense wine?", on_event=lambda n, d: second_events.append((n, d)))
+
+    assert client.generations == 1
+    assert first.answer == second.answer
+    assert second.trace["cache_hit"] is True
+    assert second.trace["total_ms"] < 50
+    assert [data["phase"] for name, data in second_events if name == "status"] == ["cached"]
+
+
+def test_stream_reports_a_pipeline_failure_as_an_error_event() -> None:
+    broken = FakePipeline(answered(ANSWERED, HITS), error=RuntimeError("ollama is down"))
+    with client_for(broken) as http:
+        body = http.get("/api/ask/stream", params={"question": "q"}).text
+
+    name, data = events(body)[-1]
+    assert (name, data) == ("error", {"message": "ollama is down"})
 
 
 def test_stream_done_carries_the_full_ask_payload(client: TestClient) -> None:
@@ -247,6 +374,20 @@ def test_health_reports_the_store_and_models(client: TestClient, pipeline: FakeP
     assert payload["store"] == "NumpyStore"
     assert payload["chunks"] == len(CORPUS)
     assert payload["models"]["gen"] == pipeline.settings.gen_model
+
+
+def test_health_reports_both_ollama_endpoints(client: TestClient, pipeline: FakePipeline) -> None:
+    """Ops needs to see whether rerank is actually running somewhere of its own."""
+    endpoints = client.get("/api/health").json()["endpoints"]
+
+    assert endpoints["ollama"] == pipeline.settings.ollama_base_url
+    assert endpoints["rerank"] == (
+        pipeline.settings.rerank_ollama_url or pipeline.settings.ollama_base_url
+    )
+
+
+def test_warm_loads_both_models(client: TestClient) -> None:
+    assert client.post("/api/warm").json() == {"rerank_ms": 12.0, "gen_ms": 34.0}
 
 
 def test_eval_latest_is_empty_when_no_sweep_has_run(

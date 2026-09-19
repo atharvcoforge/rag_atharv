@@ -28,6 +28,9 @@ export type Stage = {
   ms: number;
 };
 
+/** What the backend is doing after retrieval, announced as it starts. */
+export type Phase = "generating" | "verifying" | "cached";
+
 /** The gates the pipeline can stop at, in pipeline order. */
 export const ABSTENTION_GATES = [
   "retrieval",
@@ -50,6 +53,8 @@ export type Trace = {
   candidates: Candidate[];
   stages: Stage[];
   total_ms: number;
+  generate_ms: number;
+  verify_ms: number;
 };
 
 export type AskResponse = {

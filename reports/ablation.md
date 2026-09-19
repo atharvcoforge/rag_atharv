@@ -3,6 +3,12 @@
 48 golden questions. Thresholds fitted on a 24/24 split (`tau = 2e-05`). Lower is
 better for false answer, false refusal, and both latencies.
 
+> Re-running `full` on 2026-09-18 reproduced the retrieval rows but not the answer rows
+> (0.80 correctness, 0.167 false answers against the 0.967 and 0.111 below). The drift
+> predates the streaming work and reproduces on the commit before it; the measurements
+> are in [`latency.md`](latency.md). Re-run the sweep and re-fit `tau` before quoting
+> the answer columns here.
+
 The shipping config is **`full`**: dense + BM25 + RRF + cross-encoder rerank + quote
 verification. It is the only row that cuts false answers below 12% without raising
 false refusals.

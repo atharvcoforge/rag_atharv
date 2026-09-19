@@ -125,6 +125,8 @@ function grounded(
       candidates: cands,
       stages: STAGES,
       total_ms: STAGES.reduce((a, b) => a + b.ms, 0),
+      generate_ms: 612.4,
+      verify_ms: 143.9,
     },
   };
 }
@@ -152,6 +154,8 @@ function abstained(gate: string): AskResponse {
       candidates: cands,
       stages: STAGES.slice(0, 4),
       total_ms: STAGES.slice(0, 4).reduce((a, b) => a + b.ms, 0),
+      generate_ms: 0,
+      verify_ms: 0,
     },
   };
 }
